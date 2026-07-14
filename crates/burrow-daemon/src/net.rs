@@ -1,10 +1,9 @@
 //! iroh endpoint/router assembly and the peer-protocol server + client.
 
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{bail, Context};
+use anyhow::Context;
 use burrow_proto::peer::{PeerReply, PeerRequest, MAX_PEER_MSG};
 use burrow_proto::PEER_ALPN;
 use iroh::endpoint::presets;
@@ -13,37 +12,17 @@ use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
 
 use crate::daemon::AppState;
 
-/// Load or create the node's iroh identity (distinct from the repo key: this
-/// is the *machine's* identity; the repo key encrypts the data).
-pub fn load_or_create_node_key(path: &Path) -> anyhow::Result<SecretKey> {
-    if path.exists() {
-        let text = std::fs::read_to_string(path)?;
-        let text = text.trim();
-        let mut bytes = [0u8; 32];
-        if text.len() != 64 {
-            bail!("node key file {} is malformed", path.display());
-        }
-        for (i, byte) in bytes.iter_mut().enumerate() {
-            *byte = u8::from_str_radix(&text[i * 2..i * 2 + 2], 16)
-                .with_context(|| format!("node key file {} is not hex", path.display()))?;
-        }
-        Ok(SecretKey::from_bytes(&bytes))
-    } else {
-        let mut bytes = [0u8; 32];
-        getrandom::fill(&mut bytes).expect("OS RNG unavailable");
-        let key = SecretKey::from_bytes(&bytes);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-        std::fs::write(path, hex + "\n")?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-        }
-        Ok(key)
-    }
+/// The node's iroh identity, derived from the repo key. One recovery phrase
+/// therefore restores both the data AND the node identity — a recovered
+/// machine keeps its EndpointId, so peers still recognize it and its stored
+/// contracts/placements on their side remain valid.
+///
+/// Deriving identity from the repo secret is sound here: whoever holds the
+/// phrase can already read every backup, so impersonating the node grants
+/// nothing further.
+pub fn node_key(repo_key: &burrow_core::RepoKey) -> SecretKey {
+    let bytes = blake3::derive_key("burrow v1 node key", repo_key.as_bytes());
+    SecretKey::from_bytes(&bytes)
 }
 
 pub async fn build_endpoint(secret_key: SecretKey) -> anyhow::Result<Endpoint> {

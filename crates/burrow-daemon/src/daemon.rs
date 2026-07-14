@@ -80,9 +80,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         .with_context(|| format!("opening blob store {}", blobs_dir.display()))?;
     let blobs: iroh_blobs::api::Store = (*fs_store).clone();
 
-    let node_key =
-        crate::net::load_or_create_node_key(&crate::paths::config_dir().join("node.key"))?;
-    let endpoint = crate::net::build_endpoint(node_key).await?;
+    let endpoint = crate::net::build_endpoint(crate::net::node_key(&repo_key)).await?;
 
     let state = Arc::new(AppState {
         config,

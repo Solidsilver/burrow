@@ -1,0 +1,204 @@
+# burrow
+
+**Distributed backup among friends.** You and your self-hosting friends reserve
+slices of each other's disks; burrow keeps encrypted, deduplicated,
+version-history backups of your folders replicated across their machines — and
+theirs across yours. No cloud bill, no accounts, no port forwarding.
+
+Built on [iroh](https://www.iroh.computer/): peers are cryptographic keys,
+connections are end-to-end encrypted QUIC that hole-punches through NAT (with
+public relay fallback), and blobs are content-addressed and BLAKE3-verified in
+transit.
+
+```
+you                          anna's NAS                     ben's homelab
+┌─────────────┐   sealed     ┌──────────────┐               ┌──────────────┐
+│ ~/photos    │──chunks────▶ │ 200 GB grant │               │ 150 GB grant │
+│ ~/documents │──────────────┼──────────────┼─────────────▶ │  (replica 2) │
+│             │              │  (replica 1) │               │              │
+│ 300 GB      │ ◀────────────│ anna's data  │ ◀─────────────│ ben's data   │
+│ offered     │              └──────────────┘               └──────────────┘
+└─────────────┘        everyone hosts everyone, nobody reads anything
+```
+
+## What it does
+
+- **Restic-style snapshots**: content-defined chunking (FastCDC), incremental
+  — only changed data uploads; identical data stored once.
+- **Real end-to-end encryption**: chunks are sealed with XChaCha20-Poly1305
+  before they leave your machine. Friends host ciphertext; only your 24-word
+  recovery phrase decrypts it. Encryption is deterministic per repo key, so
+  dedup and replica tracking survive even total metadata loss.
+- **Pairwise storage contracts**: `burrow grant anna 200gb` reserves space
+  unilaterally; `burrow request ben 100gb` asks (he approves). Give/take
+  ratios are shown, never enforced — it's a friend group, not a market.
+- **Per-backup redundancy**: `replicas = 3` keeps three copies on distinct
+  peers. A placement planner spreads chunks by free space and liveness.
+- **Self-healing**: peers offline past a grace period (default 72h) trigger
+  re-replication. Random chunks are cryptographically spot-checked hourly —
+  a verified range read is proof of possession, courtesy of BLAKE3 streaming.
+- **Graceful shrink/revoke**: shrink a grant and the owner's daemon evacuates
+  data elsewhere; forced eviction only after a deadline (default 14 days).
+- **Total disaster recovery**: with nothing but your recovery phrase and one
+  friend's ticket, `burrow recover` + `burrow resync` rebuilds your entire
+  catalog and `burrow restore` pulls everything back.
+
+## Quick start
+
+Both friends install burrow, then:
+
+```console
+# each machine, once
+$ burrow init                       # writes keys, prints your RECOVERY PHRASE
+$ $EDITOR ~/.config/burrow/config.toml   # declare what to back up
+$ burrow daemon run &               # or systemd/launchd, see contrib/
+
+# pair up (send the ticket over Signal/whatever)
+you  $ burrow peer invite
+anna $ burrow peer add <ticket> --name you
+you  $ burrow requests              # see anna's request
+you  $ burrow approve anna
+
+# trade space
+you  $ burrow grant anna 200gb
+anna $ burrow grant you 150gb
+
+# back up
+you  $ burrow backup run photos
+you  $ burrow status
+BACKUP   REPLICAS  SNAPSHOTS  LAST RUN             REPLICATION   PATHS
+photos   2         1          2026-07-14 03:00:12  healthy       /home/you/photos
+```
+
+Config (`~/.config/burrow/config.toml`, see
+[contrib/config.example.toml](contrib/config.example.toml)):
+
+```toml
+[node]
+name = "my-nas"
+
+[storage]
+offer_max = "500gb"          # ceiling across all grants you give
+
+[[backup]]
+id = "photos"
+paths = ["/home/you/photos"]
+exclude = ["*.tmp", ".cache/**"]
+replicas = 3
+schedule = "0 3 * * *"       # 5-field crontab
+keep_last = 30               # prune older snapshots
+```
+
+## Restore
+
+```console
+$ burrow snapshots photos
+$ burrow restore photos --target /tmp/get-it-back          # latest
+$ burrow restore photos --snapshot 1784018594 --target ...  # point in time
+```
+
+Restore prefers local blobs and transparently fetches anything missing from
+replica holders — it works even after your blob store is gone.
+
+## Disaster recovery (the whole machine burned down)
+
+Your recovery phrase recovers **everything**: the repo key decrypts your data,
+and your node identity is derived from it, so friends' daemons recognize the
+recovered machine automatically.
+
+```console
+$ burrow recover                     # enter your 24 words
+$ burrow daemon run &
+$ burrow peer add <any-friend's-ticket> --name anna
+$ burrow resync                      # rebuild catalog from what peers hold
+$ burrow restore photos --target ~/photos
+```
+
+**Write the phrase down. Store it off-machine.** Without it your backups are
+noise; with it anyone can read them.
+
+## Commands
+
+| | |
+|---|---|
+| `burrow init` / `recover` | create / recover keys |
+| `burrow daemon run` | run the daemon (foreground) |
+| `burrow status` / `doctor` | health overview / diagnostics |
+| `burrow peer invite/add/remove`, `peers` | manage friends |
+| `burrow requests`, `approve`, `deny` | pending peerings & space requests |
+| `burrow grant <peer> <size>` | reserve space for a friend (0 = revoke) |
+| `burrow request <peer> <size>` | ask a friend for space |
+| `burrow backup run <id>`, `snapshots` | snapshot now / list history |
+| `burrow restore <id> [--snapshot ts] --target <dir>` | get data back |
+| `burrow repair` / `resync` | force verify+re-replicate / rebuild catalog |
+| `burrow key phrase` | reprint the recovery phrase |
+
+## NixOS
+
+The flake ships a package and a first-class module:
+
+```nix
+{
+  inputs.burrow.url = "github:solidsilver/burrow";
+
+  # in your configuration:
+  imports = [ burrow.nixosModules.burrow ];
+  services.burrow = {
+    enable = true;
+    settings = {
+      node.name = "my-nas";
+      storage.offer_max = "500gb";
+      backup = [{
+        id = "photos";
+        paths = [ "/tank/photos" ];
+        replicas = 3;
+        schedule = "0 3 * * *";
+      }];
+    };
+  };
+}
+```
+
+The repo key is *state*, not config: run `burrow init` once as the service
+user and stash the phrase. systemd (`contrib/burrow.service`) and launchd
+(`contrib/com.burrow.daemon.plist`) units are provided for everyone else.
+
+## Security model
+
+- Peers are Ed25519 keys (iroh endpoint IDs); every connection is mutually
+  authenticated and encrypted (QUIC/TLS).
+- Data is sealed *before* leaving your machine:
+  `chunk_key = BLAKE3-derive(repo_key ‖ keyed-hash(repo_key, plaintext))`,
+  XChaCha20-Poly1305. Deterministic per repo key (stable content addresses,
+  index-loss-proof), but keyed — no public convergent-encryption attacks.
+  Holders learn only ciphertext sizes and equality among *your own* chunks.
+- Blob access is gated per peer per hash: friends can fetch only blobs they
+  own (theirs, stored on you) or replicas you asked them to hold.
+- Threat model: honest-but-curious friends. Spot-checks catch bit rot and
+  quietly deleted data; there are no Byzantine-fault incentives — if you don't
+  trust someone with your ciphertext, don't peer with them.
+
+## How it works
+
+Each machine runs one daemon: an iroh endpoint speaking three protocols —
+iroh-blobs (data plane, per-peer authorized), a small control protocol
+(contracts, quotas, store/release requests), and a local unix socket for the
+CLI. Metadata lives in SQLite; blobs in an iroh-blobs store with GC protection
+driven by that metadata. Replication is pull-based: you ask a peer to hold a
+blob, *they* fetch it from you (quota-checked, resumable, verified), and only
+then is the replica counted. A planner converges placements toward each
+backup's replica target; verification, repair, evacuation, and pruning run as
+background loops.
+
+## Building from source
+
+```console
+$ cargo build --release          # → target/release/burrow
+$ cargo test --workspace
+```
+
+Rust 1.85+. Tested on Linux (x86_64, aarch64) and macOS.
+
+## License
+
+MIT or Apache-2.0, at your option.

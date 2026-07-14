@@ -45,6 +45,8 @@ pub enum CtrlRequest {
     RequestSpace { name: String, bytes: u64 },
     /// Force a replication + verification pass now.
     RepairNow,
+    /// Rebuild the snapshot catalog from what peers hold (disaster recovery).
+    Resync,
 }
 
 pub type CtrlResult = Result<CtrlOk, CtrlError>;

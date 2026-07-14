@@ -1,0 +1,39 @@
+# burrow configuration — lives at ~/.config/burrow/config.toml
+# (override the directory with $BURROW_CONFIG_DIR)
+
+[node]
+# Name shown to peers. Defaults to the hostname.
+name = "my-nas"
+
+[storage]
+# Ceiling across every grant you give to friends. Individual grants are made
+# at runtime with `burrow grant <peer> <size>` and can't exceed this in total.
+offer_max = "500gb"
+
+[repair]
+# A peer unseen for this long stops counting as a replica holder and its
+# blobs are re-replicated elsewhere.
+grace_period = "72h"
+# When someone shrinks a grant below what you use, how long you get to move
+# data before they may evict it (their setting governs their machine).
+evac_window = "14d"
+# How often to cryptographically spot-check that peers really hold your data.
+verify_interval = "1h"
+
+# One [[backup]] block per thing you back up.
+[[backup]]
+id = "photos"
+paths = ["/home/me/photos"]
+exclude = ["*.tmp", ".cache/**", "node_modules"]
+# Number of copies kept on distinct peers (your local copy not counted).
+replicas = 3
+# Standard 5-field crontab; omit for manual-only (`burrow backup run photos`).
+schedule = "0 3 * * *"
+# Keep only the newest N snapshots; omit to keep all.
+keep_last = 30
+
+[[backup]]
+id = "documents"
+paths = ["/home/me/documents", "/etc/important-configs"]
+replicas = 2
+schedule = "0 */6 * * *"

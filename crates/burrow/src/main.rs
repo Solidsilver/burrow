@@ -73,6 +73,16 @@ enum Command {
     Request { name: String, size: String },
     /// Verify replicas and re-replicate anything below target, right now
     Repair,
+    /// Recreate keys on a bare machine from the 24-word recovery phrase
+    Recover {
+        /// The 24-word phrase (prompted interactively if omitted)
+        #[arg(long)]
+        phrase: Option<String>,
+    },
+    /// Rebuild the snapshot catalog from what peers hold (after `recover`)
+    Resync,
+    /// Diagnose config, daemon, connectivity, and peer reachability
+    Doctor,
 }
 
 #[derive(Subcommand)]
@@ -208,6 +218,121 @@ async fn main() -> anyhow::Result<()> {
             done(call(CtrlRequest::RequestSpace { name, bytes }).await?)
         }
         Command::Repair => done(call(CtrlRequest::RepairNow).await?),
+        Command::Resync => done(call(CtrlRequest::Resync).await?),
+        Command::Recover { phrase } => recover(phrase),
+        Command::Doctor => doctor().await,
+    }
+}
+
+fn recover(phrase: Option<String>) -> anyhow::Result<()> {
+    let key_path = burrow_daemon::paths::repo_key_file();
+    if key_path.exists() {
+        anyhow::bail!(
+            "a repo key already exists at {} — this machine is not bare. \
+             (If you really mean to replace it, move that file away first.)",
+            key_path.display()
+        );
+    }
+    let phrase = match phrase {
+        Some(p) => p,
+        None => {
+            eprintln!("enter your 24-word recovery phrase:");
+            let mut line = String::new();
+            std::io::stdin().read_line(&mut line)?;
+            line
+        }
+    };
+    let key = burrow_core::RepoKey::from_recovery_phrase(phrase.trim())
+        .context("that phrase doesn't decode to a valid repo key")?;
+    std::fs::create_dir_all(burrow_daemon::paths::config_dir())?;
+    // Reuse the init-path writer for permissions; write the recovered key.
+    let hex: String = key.as_bytes().iter().map(|b| format!("{b:02x}")).collect();
+    std::fs::write(&key_path, hex + "\n")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    println!("repo key recovered to {}", key_path.display());
+    println!("your node identity is derived from it, so peers will recognize this machine.");
+    println!();
+    println!("next steps:");
+    println!("  1. create a config:            {}", burrow_daemon::paths::config_file().display());
+    println!("  2. start the daemon:           burrow daemon run");
+    println!("  3. re-add one or more friends: burrow peer add <their-ticket> --name <name>");
+    println!("  4. rebuild your catalog:       burrow resync");
+    println!("  5. get your data back:         burrow restore <backup-id> --target <dir>");
+    Ok(())
+}
+
+async fn doctor() -> anyhow::Result<()> {
+    let mut failures = 0;
+    let check = |ok: bool, label: &str, detail: String| {
+        println!("{} {label}{}", if ok { "✓" } else { "✗" }, if detail.is_empty() {
+            String::new()
+        } else {
+            format!(" — {detail}")
+        });
+        !ok as u32
+    };
+
+    let config_path = burrow_daemon::paths::config_file();
+    match burrow_daemon::config::Config::load(&config_path) {
+        Ok(c) => {
+            failures += check(true, "config", format!("{} ({} backups)", config_path.display(), c.backups.len()));
+            for b in &c.backups {
+                for p in &b.paths {
+                    if !p.exists() {
+                        failures += check(false, "backup path", format!("{} ({}) does not exist", p.display(), b.id));
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            failures += check(false, "config", format!("{e:#}"));
+        }
+    }
+    failures += check(
+        burrow_daemon::paths::repo_key_file().exists(),
+        "repo key",
+        burrow_daemon::paths::repo_key_file().display().to_string(),
+    );
+
+    match call(CtrlRequest::Status).await {
+        Ok(CtrlOk::Status(s)) => {
+            failures += check(true, "daemon", format!("v{} as {:?}", s.version, s.node_name));
+            let id_hex: String = s.endpoint_id.iter().map(|b| format!("{b:02x}")).collect();
+            println!("  endpoint id: {id_hex}");
+        }
+        Ok(_) => failures += check(false, "daemon", "unexpected reply".into()),
+        Err(e) => failures += check(false, "daemon", format!("{e:#}")),
+    }
+
+    match call(CtrlRequest::PeerList).await {
+        Ok(CtrlOk::Peers(peers)) => {
+            if peers.is_empty() {
+                println!("  (no peers configured yet)");
+            }
+            for p in peers {
+                failures += check(
+                    p.online != Some(false),
+                    &format!("peer {}", p.name),
+                    match p.online {
+                        Some(true) => "reachable".into(),
+                        Some(false) => "UNREACHABLE".into(),
+                        None => format!("not probed (state {})", p.state),
+                    },
+                );
+            }
+        }
+        Ok(_) | Err(_) => {}
+    }
+
+    if failures == 0 {
+        println!("\nall good");
+        Ok(())
+    } else {
+        anyhow::bail!("{failures} problem(s) found")
     }
 }
 

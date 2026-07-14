@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd agent for the burrow daemon on macOS.
+  Install:
+    cp com.burrow.daemon.plist ~/Library/LaunchAgents/
+    launchctl load -w ~/Library/LaunchAgents/com.burrow.daemon.plist
+  Adjust the burrow binary path if you installed it elsewhere.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.burrow.daemon</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/burrow</string>
+        <string>daemon</string>
+        <string>run</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/tmp/burrow-daemon.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/burrow-daemon.log</string>
+</dict>
+</plist>

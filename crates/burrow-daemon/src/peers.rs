@@ -766,6 +766,42 @@ async fn handle_inner(
             // The blobs themselves are removed by GC once nothing protects them (M5).
             Ok(PeerReply::ReleaseAck { dropped })
         }
+        PeerRequest::ListHeld { offset } => {
+            if !is_active {
+                return Ok(PeerReply::Error("peering not approved yet".into()));
+            }
+            let (entries, more) = state
+                .db
+                .call(move |conn| {
+                    let mut stmt = conn.prepare(
+                        "SELECT blob_hash, size, is_manifest FROM held WHERE owner = ?1
+                         ORDER BY blob_hash LIMIT ?2 OFFSET ?3",
+                    )?;
+                    let page = burrow_proto::peer::HELD_PAGE;
+                    let rows = stmt.query_map(
+                        rusqlite::params![id, page + 1, offset],
+                        |r| {
+                            Ok((
+                                r.get::<_, Vec<u8>>(0)?,
+                                r.get::<_, u64>(1)?,
+                                r.get::<_, bool>(2)?,
+                            ))
+                        },
+                    )?;
+                    let mut entries = Vec::new();
+                    for row in rows {
+                        let (h, size, is_manifest) = row?;
+                        if let Ok(hash) = <[u8; 32]>::try_from(h) {
+                            entries.push(burrow_proto::peer::HeldEntry { hash, size, is_manifest });
+                        }
+                    }
+                    let more = entries.len() as u64 > page;
+                    entries.truncate(page as usize);
+                    Ok((entries, more))
+                })
+                .await?;
+            Ok(PeerReply::HeldPage { entries, more })
+        }
         PeerRequest::QuotaStatus => {
             let (granted, used) = state
                 .db

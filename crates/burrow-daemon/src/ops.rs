@@ -233,6 +233,168 @@ pub async fn backup_run(state: &Arc<AppState>, backup_id: &str) -> anyhow::Resul
     Ok(info)
 }
 
+/// Disaster-recovery resync: ask every active peer what they hold for us,
+/// rebuild placements, pull the snapshot manifests back, and re-register the
+/// snapshots they describe. After a bare-machine recovery this restores the
+/// full catalog; `burrow restore` then works normally (fetching from peers).
+pub async fn resync(state: &Arc<AppState>) -> anyhow::Result<String> {
+    use burrow_proto::peer::{PeerReply, PeerRequest};
+
+    let peers: Vec<Vec<u8>> = state
+        .db
+        .call(|conn| {
+            let mut stmt =
+                conn.prepare("SELECT endpoint_id FROM peers WHERE state = 'active'")?;
+            let rows = stmt.query_map([], |r| r.get(0))?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            Ok(out)
+        })
+        .await?;
+    if peers.is_empty() {
+        anyhow::bail!("no active peers — add one with `burrow peer add <ticket>` first");
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock before 1970")
+        .as_secs();
+    let mut manifest_hashes: Vec<[u8; 32]> = Vec::new();
+    let mut replicas = 0u64;
+    for peer_bytes in peers {
+        let Ok(id_arr) = <[u8; 32]>::try_from(peer_bytes) else { continue };
+        let Ok(peer) = iroh::EndpointId::from_bytes(&id_arr) else { continue };
+        let mut offset = 0u64;
+        loop {
+            let reply = match crate::net::peer_call(
+                &state.endpoint,
+                peer,
+                &PeerRequest::ListHeld { offset },
+            )
+            .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(peer = %peer.fmt_short(), "resync: unreachable: {e:#}");
+                    break;
+                }
+            };
+            let (entries, more) = match reply {
+                PeerReply::HeldPage { entries, more } => (entries, more),
+                PeerReply::Error(e) => {
+                    tracing::warn!(peer = %peer.fmt_short(), "resync refused: {e}");
+                    break;
+                }
+                other => anyhow::bail!("unexpected reply: {other:?}"),
+            };
+            let count = entries.len() as u64;
+            replicas += count;
+            for e in &entries {
+                if e.is_manifest {
+                    manifest_hashes.push(e.hash);
+                }
+            }
+            let rows: Vec<([u8; 32], u64)> = entries.iter().map(|e| (e.hash, e.size)).collect();
+            state
+                .db
+                .call(move |conn| {
+                    let tx = conn.transaction()?;
+                    for (hash, size) in rows {
+                        tx.execute(
+                            "INSERT INTO placements (blob_hash, peer, size, state, updated_at)
+                             VALUES (?1, ?2, ?3, 'stored', ?4)
+                             ON CONFLICT(blob_hash, peer) DO UPDATE SET
+                               size = excluded.size,
+                               state = CASE WHEN placements.state = 'verified'
+                                            THEN 'verified' ELSE 'stored' END",
+                            rusqlite::params![hash.as_slice(), id_arr.as_slice(), size, now],
+                        )?;
+                    }
+                    tx.commit()?;
+                    Ok(())
+                })
+                .await?;
+            if !more {
+                break;
+            }
+            offset += count;
+        }
+    }
+
+    // Pull each manifest back, decode it, and re-register its snapshot.
+    let mut snapshots = 0u64;
+    for mh in manifest_hashes {
+        let hash = burrow_core::BlobHash(mh);
+        if let Err(e) = fetch_missing(state, &[hash]).await {
+            tracing::warn!(blob = %hash, "resync: manifest fetch failed: {e:#}");
+            continue;
+        }
+        let bytes = state.blobs.blobs().get_bytes(to_iroh_hash(&hash)).await?;
+        let manifest = match burrow_core::manifest::Manifest::open(&state.repo_key, &bytes) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(blob = %hash, "resync: manifest undecodable (wrong key?): {e}");
+                continue;
+            }
+        };
+        let mut refs: Vec<([u8; 32], u64, bool)> = manifest
+            .entries
+            .iter()
+            .filter_map(|e| match &e.kind {
+                EntryKind::File { chunks, .. } => Some(chunks.iter().map(|c| {
+                    (c.blob_hash.0, c.size as u64 + burrow_core::crypto::BLOB_OVERHEAD as u64, false)
+                })),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        refs.push((mh, bytes.len() as u64, true));
+        let file_count = manifest
+            .entries
+            .iter()
+            .filter(|e| matches!(e.kind, EntryKind::File { .. }))
+            .count() as u64;
+        let chunk_count = manifest.referenced_blobs().len() as u64;
+        let (backup_id, created_at, total) =
+            (manifest.backup_id.clone(), manifest.created_at, manifest.total_bytes());
+        let inserted = state
+            .db
+            .call(move |conn| {
+                let tx = conn.transaction()?;
+                let n = tx.execute(
+                    "INSERT INTO snapshots
+                     (backup_id, created_at, manifest_hash, file_count, bytes_scanned, bytes_new, chunk_count)
+                     VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)
+                     ON CONFLICT(manifest_hash) DO NOTHING",
+                    rusqlite::params![backup_id, created_at, mh.as_slice(), file_count, total, chunk_count],
+                )?;
+                for (hash, size, is_manifest) in &refs {
+                    tx.execute(
+                        "INSERT INTO chunk_refs (backup_id, blob_hash, size, is_manifest)
+                         VALUES (?1, ?2, ?3, ?4)
+                         ON CONFLICT(backup_id, blob_hash) DO NOTHING",
+                        rusqlite::params![backup_id, hash.as_slice(), size, is_manifest],
+                    )?;
+                }
+                tx.commit()?;
+                Ok(n > 0)
+            })
+            .await?;
+        if inserted {
+            snapshots += 1;
+        }
+        // Re-pin the manifest locally.
+        let tag = format!("snapshot/{}/{}", manifest.backup_id, manifest.created_at);
+        let _ = state.blobs.tags().set(tag, to_iroh_hash(&hash)).await;
+    }
+    Ok(format!(
+        "resync complete: {replicas} replicas catalogued, {snapshots} snapshots re-registered — \
+         run `burrow snapshots` then `burrow restore`"
+    ))
+}
+
 /// Enforce `keep_last`: drop old snapshots, rebuild this backup's chunk_refs
 /// from the surviving manifests, unpin pruned manifest tags, and release
 /// now-orphaned blobs from peers. Local orphans then fall to GC.

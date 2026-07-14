@@ -25,6 +25,18 @@ pub enum PeerRequest {
     RequestStore { hash: [u8; 32], size: u64, is_manifest: bool },
     /// Tell the remote it may drop blobs of ours it holds.
     Release { hashes: Vec<[u8; 32]> },
+    /// List blobs of ours the remote holds (paginated; disaster recovery).
+    ListHeld { offset: u64 },
+}
+
+/// Page size for ListHeld replies (fits comfortably in MAX_PEER_MSG).
+pub const HELD_PAGE: u64 = 1000;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeldEntry {
+    pub hash: [u8; 32],
+    pub size: u64,
+    pub is_manifest: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,6 +49,7 @@ pub enum PeerReply {
     /// Blob fetched and stored (or already present).
     StoreDone,
     ReleaseAck { dropped: u32 },
+    HeldPage { entries: Vec<HeldEntry>, more: bool },
     /// Request refused (unknown peer, not approved, malformed…).
     Error(String),
 }
