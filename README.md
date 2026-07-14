@@ -39,9 +39,18 @@ you                          anna's NAS                     ben's homelab
   a verified range read is proof of possession, courtesy of BLAKE3 streaming.
 - **Graceful shrink/revoke**: shrink a grant and the owner's daemon evacuates
   data elsewhere; forced eviction only after a deadline (default 14 days).
+- **One identity, many devices**: your NAS, desktop, and laptop share one
+  24-word phrase. `burrow device join` links a new machine with zero
+  ceremony; friends approve *you* once and every device you add is trusted
+  automatically (owner-signed device certificates). Laptops run in
+  `client` mode (back up, never host); host devices serve your other
+  devices with no grants needed.
+- **Laptop-aware**: scheduled work defers on battery (`run_on_battery =
+  false`), `burrow pause 2h` for tethered moments, and an unchanged-file
+  cache so re-scanning a big tree reads only what changed.
 - **Total disaster recovery**: with nothing but your recovery phrase and one
-  friend's ticket, `burrow recover` + `burrow resync` rebuilds your entire
-  catalog and `burrow restore` pulls everything back.
+  friend's ticket, `burrow device join` + `burrow resync` rebuilds your
+  entire catalog and `burrow restore` pulls everything back.
 
 ## Quick start
 
@@ -75,7 +84,11 @@ Config (`~/.config/burrow/config.toml`, see
 
 ```toml
 [node]
-name = "my-nas"
+name = "you"                 # your name, shown to friends (owner-level)
+
+[device]
+mode = "host"                # "client" on laptops: backs up, never hosts
+run_on_battery = true        # false on laptops: defer scheduled work
 
 [storage]
 offer_max = "500gb"          # ceiling across all grants you give
@@ -84,10 +97,25 @@ offer_max = "500gb"          # ceiling across all grants you give
 id = "photos"
 paths = ["/home/you/photos"]
 exclude = ["*.tmp", ".cache/**"]
-replicas = 3
+replicas = 3                 # copies across distinct devices (yours count)
+min_offsite = 1              # at least this many on OTHER people's machines
 schedule = "0 3 * * *"       # 5-field crontab
 keep_last = 30               # prune older snapshots
 ```
+
+## Your own devices
+
+```console
+nas    $ burrow device link            # prints a ticket
+laptop $ burrow device join <ticket> --device laptop
+         # asks for your 24-word phrase — same identity, new device
+laptop $ burrow status                 # NAS appears under MY DEVICES
+```
+
+Devices of one owner need no grants or approvals between them: host devices
+serve their owner automatically, friends any device adds are known to all of
+them, and a friend's grant to *you* is usable from every device. `replicas`
+counts your own devices; `min_offsite` guarantees copies leave the building.
 
 ## Restore
 
@@ -122,6 +150,8 @@ noise; with it anyone can read them.
 | | |
 |---|---|
 | `burrow init` / `recover` | create / recover keys |
+| `burrow device link/join/list` | one identity across your machines |
+| `burrow pause [2h]` / `resume` | suspend scheduled work |
 | `burrow daemon run` | run the daemon (foreground) |
 | `burrow status` / `doctor` | health overview / diagnostics |
 | `burrow peer invite/add/remove`, `peers` | manage friends |

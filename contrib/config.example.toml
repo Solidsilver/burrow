@@ -2,8 +2,15 @@
 # (override the directory with $BURROW_CONFIG_DIR)
 
 [node]
-# Name shown to peers. Defaults to the hostname.
-name = "my-nas"
+# YOUR name (owner-level, shown to friends). Defaults to the hostname.
+name = "me"
+
+[device]
+# "host" stores data for you and friends; "client" only backs up (laptops).
+mode = "host"
+# Set false on laptops: scheduled backups and replication defer while on
+# battery and catch up on AC.
+run_on_battery = true
 
 [storage]
 # Ceiling across every grant you give to friends. Individual grants are made
@@ -25,8 +32,10 @@ verify_interval = "1h"
 id = "photos"
 paths = ["/home/me/photos"]
 exclude = ["*.tmp", ".cache/**", "node_modules"]
-# Number of copies kept on distinct peers (your local copy not counted).
+# Copies kept on distinct devices (your own NAS counts; this machine doesn't).
 replicas = 3
+# Copies required on OTHER people's machines — the off-site guarantee.
+min_offsite = 1
 # Standard 5-field crontab; omit for manual-only (`burrow backup run photos`).
 schedule = "0 3 * * *"
 # Keep only the newest N snapshots; omit to keep all.

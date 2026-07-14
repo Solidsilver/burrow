@@ -34,7 +34,7 @@ pub async fn status(state: &Arc<AppState>) -> anyhow::Result<StatusInfo> {
                 let last = conn
                     .query_row(
                         "SELECT * FROM snapshots WHERE backup_id = ?1
-                         ORDER BY created_at DESC LIMIT 1",
+                         ORDER BY created_at DESC, id DESC LIMIT 1",
                         [&backup_id],
                         crate::db::rows::snapshot_info,
                     )
@@ -734,7 +734,7 @@ pub async fn restore(
                 ),
                 None => conn.query_row(
                     "SELECT * FROM snapshots WHERE backup_id = ?1
-                     ORDER BY created_at DESC LIMIT 1",
+                     ORDER BY created_at DESC, id DESC LIMIT 1",
                     [&id],
                     crate::db::rows::snapshot_info,
                 ),
