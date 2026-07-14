@@ -77,6 +77,19 @@ async fn dispatch(state: &Arc<AppState>, req: CtrlRequest) -> anyhow::Result<Ctr
             Ok(CtrlOk::Done(crate::peers::request_space(state, &name, bytes).await?))
         }
         CtrlRequest::Resync => Ok(CtrlOk::Done(crate::ops::resync(state).await?)),
+        CtrlRequest::DeviceJoin { ticket } => {
+            let (reply, _) = crate::peers::hello_via_ticket(state, &ticket).await?;
+            if reply.identity.owner_pk != state.owner_pk {
+                anyhow::bail!(
+                    "that ticket belongs to {:?}, not to you — use `burrow peer add` for friends",
+                    reply.identity.owner_name
+                );
+            }
+            Ok(CtrlOk::Done(format!(
+                "linked with your device {:?} — it now recognizes this machine automatically",
+                reply.identity.device_name
+            )))
+        }
         CtrlRequest::RepairNow => {
             let (ok, lost) = crate::verify::verify_round(state).await?;
             let placed = crate::replicate::tick(state).await?;

@@ -13,11 +13,45 @@ pub struct Config {
     #[serde(default)]
     pub node: NodeConfig,
     #[serde(default)]
+    pub device: DeviceConfig,
+    #[serde(default)]
     pub storage: StorageConfig,
     #[serde(default)]
     pub repair: RepairConfig,
     #[serde(default, rename = "backup")]
     pub backups: Vec<BackupConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct DeviceConfig {
+    /// "host" stores data for yourself and friends; "client" only backs up
+    /// (laptops). Client devices refuse inbound grants and store requests.
+    pub mode: DeviceMode,
+    /// When false, scheduled backups and replication defer while on battery.
+    pub run_on_battery: bool,
+}
+
+impl Default for DeviceConfig {
+    fn default() -> Self {
+        Self { mode: DeviceMode::Host, run_on_battery: true }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DeviceMode {
+    Host,
+    Client,
+}
+
+impl DeviceMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DeviceMode::Host => "host",
+            DeviceMode::Client => "client",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -85,6 +119,10 @@ pub struct BackupConfig {
     /// Keep only the newest N snapshots; older ones are pruned after each
     /// run and their unique blobs released from peers. None = keep all.
     pub keep_last: Option<u32>,
+    /// Copies required on OTHER owners' machines (off-site guarantee),
+    /// beyond whatever `replicas` places. 0 = no requirement.
+    #[serde(default)]
+    pub min_offsite: u32,
 }
 
 fn default_replicas() -> u32 {

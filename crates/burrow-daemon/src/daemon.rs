@@ -18,8 +18,13 @@ pub struct AppState {
     pub blobs: iroh_blobs::api::Store,
     /// Held for the FsStore's lifetime.
     pub fs_store: FsStore,
-    /// This node's iroh endpoint (identity + connectivity).
+    /// This device's iroh endpoint.
     pub endpoint: iroh::Endpoint,
+    /// The person this device belongs to (derived from the repo key).
+    pub owner_pk: [u8; 32],
+    pub device_name: String,
+    /// Precomputed identity presented in Hello exchanges.
+    pub identity: burrow_proto::peer::DeviceIdentity,
     /// Serializes backup runs.
     pub backup_lock: tokio::sync::Mutex<()>,
     /// Serializes replication passes.
@@ -80,7 +85,18 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         .with_context(|| format!("opening blob store {}", blobs_dir.display()))?;
     let blobs: iroh_blobs::api::Store = (*fs_store).clone();
 
-    let endpoint = crate::net::build_endpoint(crate::net::node_key(&repo_key)).await?;
+    let device_name =
+        crate::keys::load_or_create_device_name(&crate::paths::device_name_file(), None)?;
+    let endpoint =
+        crate::net::build_endpoint(crate::net::device_key(&repo_key, &device_name)).await?;
+    let owner_pk = *crate::net::owner_key(&repo_key).public().as_bytes();
+    let identity = burrow_proto::peer::DeviceIdentity {
+        owner_pk,
+        device_name: device_name.clone(),
+        owner_name: config.node_name(),
+        mode: config.device.mode.as_str().to_string(),
+        cert: crate::net::device_cert(&repo_key, endpoint.id()),
+    };
 
     let state = Arc::new(AppState {
         config,
@@ -89,9 +105,44 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         blobs,
         fs_store,
         endpoint: endpoint.clone(),
+        owner_pk,
+        device_name: device_name.clone(),
+        identity,
         backup_lock: tokio::sync::Mutex::new(()),
         replicate_lock: tokio::sync::Mutex::new(()),
     });
+
+    // Register ourselves: the self owner row and this device.
+    {
+        let pk = owner_pk.to_vec();
+        let my_id = state.endpoint.id().as_bytes().to_vec();
+        let name = state.config.node_name();
+        let dev = device_name.clone();
+        let mode = state.config.device.mode.as_str().to_string();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock before 1970")
+            .as_secs();
+        state
+            .db
+            .call(move |conn| {
+                conn.execute(
+                    "INSERT INTO owners (owner_pk, name, state, added_at, last_seen)
+                     VALUES (?1, ?2, 'self', ?3, ?3)
+                     ON CONFLICT(owner_pk) DO UPDATE SET name = excluded.name, state = 'self'",
+                    rusqlite::params![pk, name, now],
+                )?;
+                conn.execute(
+                    "INSERT INTO devices (endpoint_id, owner_pk, device_name, mode, last_seen)
+                     VALUES (?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT(endpoint_id) DO UPDATE SET
+                       device_name = excluded.device_name, mode = excluded.mode",
+                    rusqlite::params![my_id, pk, dev, mode, now],
+                )?;
+                Ok(())
+            })
+            .await?;
+    }
 
     // Data plane: iroh-blobs gated by the per-peer auth loop.
     let (events_tx, events_rx) = iroh_blobs::provider::events::EventSender::channel(
@@ -145,6 +196,30 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     crate::replicate::spawn_replication_loop(Arc::downgrade(&state));
     crate::verify::spawn_verify_loop(Arc::downgrade(&state));
     crate::scheduler::spawn_scheduler(Arc::downgrade(&state));
+
+    // Consume a pending join/pair ticket left by `burrow device join` or
+    // `burrow peer add` on a machine whose daemon wasn't running yet.
+    {
+        let ticket_file = crate::paths::join_ticket_file();
+        if let Ok(ticket) = std::fs::read_to_string(&ticket_file) {
+            let state = state.clone();
+            tokio::spawn(async move {
+                match crate::peers::hello_via_ticket(&state, ticket.trim()).await {
+                    Ok((reply, _)) => {
+                        tracing::info!(
+                            with = %reply.identity.device_name,
+                            same_owner = reply.identity.owner_pk == state.owner_pk,
+                            "pending join ticket consumed"
+                        );
+                        let _ = std::fs::remove_file(&ticket_file);
+                    }
+                    Err(e) => {
+                        tracing::warn!("pending join ticket failed (kept for retry): {e:#}")
+                    }
+                }
+            });
+        }
+    }
 
     shutdown_signal().await;
     tracing::info!("shutting down");

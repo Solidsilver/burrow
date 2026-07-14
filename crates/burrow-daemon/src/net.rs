@@ -12,17 +12,51 @@ use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
 
 use crate::daemon::AppState;
 
-/// The node's iroh identity, derived from the repo key. One recovery phrase
-/// therefore restores both the data AND the node identity — a recovered
-/// machine keeps its EndpointId, so peers still recognize it and its stored
-/// contracts/placements on their side remain valid.
+/// Identity model: everything derives from the one repo key (master phrase).
 ///
-/// Deriving identity from the repo secret is sound here: whoever holds the
-/// phrase can already read every backup, so impersonating the node grants
-/// nothing further.
-pub fn node_key(repo_key: &burrow_core::RepoKey) -> SecretKey {
-    let bytes = blake3::derive_key("burrow v1 node key", repo_key.as_bytes());
+/// - The OWNER key identifies the person. Friends approve and grant space to
+///   the owner, not to machines.
+/// - Each DEVICE gets its own endpoint identity, derived from the repo key
+///   plus its device name, and carries a certificate — the owner key's
+///   signature over its endpoint id — so any receiver can verify "this
+///   connection belongs to that owner" without shared state.
+///
+/// Deriving identities from the repo secret is sound here: whoever holds the
+/// phrase can already read every backup, so impersonation grants nothing
+/// further. And it means one phrase recovers everything — data, owner
+/// identity, and (with any device name) a working device identity.
+pub fn owner_key(repo_key: &burrow_core::RepoKey) -> SecretKey {
+    let bytes = blake3::derive_key("burrow v1 owner key", repo_key.as_bytes());
     SecretKey::from_bytes(&bytes)
+}
+
+pub fn device_key(repo_key: &burrow_core::RepoKey, device_name: &str) -> SecretKey {
+    let mut material = Vec::with_capacity(32 + device_name.len());
+    material.extend_from_slice(repo_key.as_bytes());
+    material.extend_from_slice(device_name.as_bytes());
+    let bytes = blake3::derive_key("burrow v1 device key", &material);
+    SecretKey::from_bytes(&bytes)
+}
+
+const CERT_CONTEXT: &[u8] = b"burrow device v1";
+
+/// Owner's signature binding a device endpoint id to the owner identity.
+pub fn device_cert(repo_key: &burrow_core::RepoKey, device: EndpointId) -> [u8; 64] {
+    let mut msg = Vec::with_capacity(CERT_CONTEXT.len() + 32);
+    msg.extend_from_slice(CERT_CONTEXT);
+    msg.extend_from_slice(device.as_bytes());
+    owner_key(repo_key).sign(&msg).to_bytes()
+}
+
+pub fn verify_device_cert(owner_pk: &[u8; 32], device: EndpointId, cert: &[u8; 64]) -> bool {
+    let Ok(owner) = iroh::PublicKey::from_bytes(owner_pk) else {
+        return false;
+    };
+    let mut msg = Vec::with_capacity(CERT_CONTEXT.len() + 32);
+    msg.extend_from_slice(CERT_CONTEXT);
+    msg.extend_from_slice(device.as_bytes());
+    let sig = iroh::Signature::from_bytes(cert);
+    owner.verify(&msg, &sig).is_ok()
 }
 
 pub async fn build_endpoint(secret_key: SecretKey) -> anyhow::Result<Endpoint> {

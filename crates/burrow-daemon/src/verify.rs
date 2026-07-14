@@ -42,31 +42,31 @@ pub fn spawn_verify_loop(state: std::sync::Weak<AppState>) {
 }
 
 pub async fn verify_round(state: &Arc<AppState>) -> anyhow::Result<(u32, u32)> {
-    // Oldest-verified placements first, grouped per peer.
+    // Oldest-verified placements first, grouped per device.
     let work: Vec<(Vec<u8>, Vec<(Vec<u8>, u64)>)> = state
         .db
         .call(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT peer FROM placements WHERE state IN ('stored', 'verified')
-                 GROUP BY peer",
+                "SELECT device FROM placements WHERE state IN ('stored', 'verified')
+                 GROUP BY device",
             )?;
-            let peers: Vec<Vec<u8>> = stmt
+            let devices: Vec<Vec<u8>> = stmt
                 .query_map([], |r| r.get(0))?
                 .collect::<Result<_, _>>()?;
             let mut out = Vec::new();
-            for peer in peers {
+            for device in devices {
                 let mut stmt = conn.prepare(
                     "SELECT blob_hash, size FROM placements
-                     WHERE peer = ?1 AND state IN ('stored', 'verified')
+                     WHERE device = ?1 AND state IN ('stored', 'verified')
                      ORDER BY COALESCE(last_verified, 0) ASC
                      LIMIT ?2",
                 )?;
                 let blobs: Vec<(Vec<u8>, u64)> = stmt
-                    .query_map(rusqlite::params![peer, CHECKS_PER_PEER as i64], |r| {
+                    .query_map(rusqlite::params![device, CHECKS_PER_PEER as i64], |r| {
                         Ok((r.get(0)?, r.get(1)?))
                     })?
                     .collect::<Result<_, _>>()?;
-                out.push((peer, blobs));
+                out.push((device, blobs));
             }
             Ok(out)
         })
@@ -107,7 +107,7 @@ pub async fn verify_round(state: &Arc<AppState>) -> anyhow::Result<(u32, u32)> {
                         conn.execute(
                             "UPDATE placements SET state = 'verified', last_verified = ?3,
                                     updated_at = ?3
-                             WHERE blob_hash = ?1 AND peer = ?2",
+                             WHERE blob_hash = ?1 AND device = ?2",
                             rusqlite::params![h.as_slice(), p.as_slice(), now],
                         )?;
                         Ok(())
@@ -125,7 +125,7 @@ pub async fn verify_round(state: &Arc<AppState>) -> anyhow::Result<(u32, u32)> {
                     .call(move |conn| {
                         conn.execute(
                             "UPDATE placements SET state = 'lost', updated_at = ?3
-                             WHERE blob_hash = ?1 AND peer = ?2",
+                             WHERE blob_hash = ?1 AND device = ?2",
                             rusqlite::params![h.as_slice(), p.as_slice(), now],
                         )?;
                         Ok(())
@@ -139,7 +139,7 @@ pub async fn verify_round(state: &Arc<AppState>) -> anyhow::Result<(u32, u32)> {
             .db
             .call(move |conn| {
                 conn.execute(
-                    "UPDATE peers SET last_seen = ?2 WHERE endpoint_id = ?1",
+                    "UPDATE devices SET last_seen = ?2 WHERE endpoint_id = ?1",
                     rusqlite::params![id_arr.as_slice(), now],
                 )?;
                 Ok(())

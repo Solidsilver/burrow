@@ -107,6 +107,98 @@ fn migrations() -> Migrations<'static> {
             // owner until this deadline to evacuate before forced eviction.
             "ALTER TABLE grants ADD COLUMN shrink_deadline INTEGER;",
         ),
+        M::up(
+            // v5: owner-identity model. Peer-keyed tables are dropped and
+            // recreated keyed by owner (person) with devices underneath.
+            // Pre-release schema: dropping runtime peer state is acceptable.
+            r#"
+            DROP TABLE IF EXISTS space_requests;
+            DROP TABLE IF EXISTS held;
+            DROP TABLE IF EXISTS grants;
+            DROP TABLE IF EXISTS placements;
+            DROP TABLE IF EXISTS transfer_ledger;
+            DROP TABLE IF EXISTS peers;
+
+            CREATE TABLE owners (
+                owner_pk BLOB PRIMARY KEY,          -- 32 bytes, ed25519
+                name TEXT NOT NULL UNIQUE,          -- local nickname
+                state TEXT NOT NULL,                -- 'pending_in' | 'active' | 'self'
+                added_at INTEGER NOT NULL,
+                last_seen INTEGER
+            );
+            CREATE TABLE devices (
+                endpoint_id BLOB PRIMARY KEY,       -- 32 bytes
+                owner_pk BLOB NOT NULL REFERENCES owners(owner_pk) ON DELETE CASCADE,
+                device_name TEXT NOT NULL,
+                mode TEXT NOT NULL DEFAULT 'host',  -- 'host' | 'client'
+                ticket TEXT,                        -- dial hints
+                last_seen INTEGER
+            );
+            CREATE INDEX idx_devices_owner ON devices(owner_pk);
+            -- Space THIS DEVICE promises to an owner (their any device may use it).
+            CREATE TABLE grants_given (
+                owner_pk BLOB PRIMARY KEY REFERENCES owners(owner_pk) ON DELETE CASCADE,
+                granted_bytes INTEGER NOT NULL,
+                used_bytes INTEGER NOT NULL DEFAULT 0,
+                shrink_deadline INTEGER,
+                updated_at INTEGER NOT NULL
+            );
+            -- Space a specific remote device promises OUR owner.
+            CREATE TABLE grants_received (
+                device BLOB PRIMARY KEY REFERENCES devices(endpoint_id) ON DELETE CASCADE,
+                owner_pk BLOB NOT NULL,
+                granted_bytes INTEGER NOT NULL,
+                used_bytes INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL
+            );
+            -- Blobs this device stores, per owning person.
+            CREATE TABLE held (
+                owner_pk BLOB NOT NULL REFERENCES owners(owner_pk) ON DELETE CASCADE,
+                blob_hash BLOB NOT NULL,
+                size INTEGER NOT NULL,
+                is_manifest INTEGER NOT NULL DEFAULT 0,
+                stored_at INTEGER NOT NULL,
+                PRIMARY KEY (owner_pk, blob_hash)
+            );
+            CREATE INDEX idx_held_hash ON held(blob_hash);
+            CREATE TABLE space_requests (
+                owner_pk BLOB PRIMARY KEY REFERENCES owners(owner_pk) ON DELETE CASCADE,
+                bytes INTEGER NOT NULL,
+                given_total INTEGER NOT NULL DEFAULT 0,
+                received_total INTEGER NOT NULL DEFAULT 0,
+                requested_at INTEGER NOT NULL
+            );
+            -- Where my blobs live: physical device, with owner for diversity.
+            CREATE TABLE placements (
+                blob_hash BLOB NOT NULL,
+                device BLOB NOT NULL REFERENCES devices(endpoint_id) ON DELETE CASCADE,
+                owner_pk BLOB NOT NULL,
+                size INTEGER NOT NULL,
+                state TEXT NOT NULL,   -- 'pending' | 'stored' | 'verified' | 'lost'
+                updated_at INTEGER NOT NULL,
+                last_verified INTEGER,
+                PRIMARY KEY (blob_hash, device)
+            );
+            CREATE INDEX idx_placements_device ON placements(device);
+            CREATE INDEX idx_placements_owner ON placements(owner_pk);
+            CREATE TABLE transfer_ledger (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_pk BLOB NOT NULL,
+                direction TEXT NOT NULL,
+                bytes INTEGER NOT NULL,
+                at INTEGER NOT NULL
+            );
+            -- mtime cache: skip re-chunking unchanged files (P2-M3).
+            CREATE TABLE file_cache (
+                backup_id TEXT NOT NULL,
+                path TEXT NOT NULL,
+                size INTEGER NOT NULL,
+                mtime INTEGER NOT NULL,
+                chunks BLOB NOT NULL,               -- postcard Vec<ChunkRef>
+                PRIMARY KEY (backup_id, path)
+            );
+            "#,
+        ),
     ])
 }
 

@@ -38,6 +38,18 @@ pub fn repo_key_file() -> PathBuf {
     config_dir().join("repo.key")
 }
 
+/// The device's stable name (state, not config — renaming would change the
+/// derived device identity). Written once by init / device join.
+pub fn device_name_file() -> PathBuf {
+    config_dir().join("device.name")
+}
+
+/// A pending `device join` / `peer add` ticket the daemon consumes at startup
+/// (lets joining work before the daemon has ever run — headless friendly).
+pub fn join_ticket_file() -> PathBuf {
+    config_dir().join("join.ticket")
+}
+
 /// Unix sockets are limited to ~104 bytes of path (SUN_LEN), so the socket
 /// can't live under an arbitrarily deep data dir. It goes in a short runtime
 /// dir instead, named by a hash of the data dir so distinct daemons never

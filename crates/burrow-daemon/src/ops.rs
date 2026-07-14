@@ -55,12 +55,45 @@ pub async fn status(state: &Arc<AppState>) -> anyhow::Result<StatusInfo> {
             health: replication_health(state, &b.id, b.replicas).await?,
         });
     }
+    let offer_max = state
+        .config
+        .storage
+        .offer_max
+        .as_deref()
+        .map(crate::config::parse_size)
+        .transpose()?;
+    let self_pk = state.owner_pk.to_vec();
+    let (held_total, grants) = state
+        .db
+        .call(move |conn| {
+            let held_total: u64 =
+                conn.query_row("SELECT COALESCE(SUM(size), 0) FROM held", [], |r| r.get(0))?;
+            let mut stmt = conn.prepare(
+                "SELECT o.name, g.granted_bytes, g.used_bytes FROM grants_given g
+                 JOIN owners o ON o.owner_pk = g.owner_pk
+                 WHERE g.owner_pk != ?1 ORDER BY o.name",
+            )?;
+            let rows = stmt.query_map([&self_pk], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, u64>(1)?, r.get::<_, u64>(2)?))
+            })?;
+            let mut grants = Vec::new();
+            for row in rows {
+                grants.push(row?);
+            }
+            Ok((held_total, grants))
+        })
+        .await?;
+
     Ok(StatusInfo {
         node_name: state.config.node_name(),
+        device_name: state.device_name.clone(),
+        mode: state.config.device.mode.as_str().to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         data_dir: crate::paths::data_dir(),
         endpoint_id: *state.endpoint.id().as_bytes(),
+        owner_pk: state.owner_pk,
         backups,
+        hosting: burrow_proto::ctrl::HostingInfo { offer_max, held_total, grants },
     })
 }
 
@@ -240,12 +273,16 @@ pub async fn backup_run(state: &Arc<AppState>, backup_id: &str) -> anyhow::Resul
 pub async fn resync(state: &Arc<AppState>) -> anyhow::Result<String> {
     use burrow_proto::peer::{PeerReply, PeerRequest};
 
-    let peers: Vec<Vec<u8>> = state
+    let my_device = state.endpoint.id().as_bytes().to_vec();
+    let peers: Vec<(Vec<u8>, Vec<u8>)> = state
         .db
-        .call(|conn| {
-            let mut stmt =
-                conn.prepare("SELECT endpoint_id FROM peers WHERE state = 'active'")?;
-            let rows = stmt.query_map([], |r| r.get(0))?;
+        .call(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT d.endpoint_id, d.owner_pk FROM devices d
+                 JOIN owners o ON o.owner_pk = d.owner_pk
+                 WHERE o.state IN ('active', 'self') AND d.endpoint_id != ?1",
+            )?;
+            let rows = stmt.query_map([&my_device], |r| Ok((r.get(0)?, r.get(1)?)))?;
             let mut out = Vec::new();
             for row in rows {
                 out.push(row?);
@@ -254,7 +291,7 @@ pub async fn resync(state: &Arc<AppState>) -> anyhow::Result<String> {
         })
         .await?;
     if peers.is_empty() {
-        anyhow::bail!("no active peers — add one with `burrow peer add <ticket>` first");
+        anyhow::bail!("no known devices — add one with `burrow peer add` or `burrow device join` first");
     }
 
     let now = std::time::SystemTime::now()
@@ -263,8 +300,9 @@ pub async fn resync(state: &Arc<AppState>) -> anyhow::Result<String> {
         .as_secs();
     let mut manifest_hashes: Vec<[u8; 32]> = Vec::new();
     let mut replicas = 0u64;
-    for peer_bytes in peers {
+    for (peer_bytes, owner_bytes) in peers {
         let Ok(id_arr) = <[u8; 32]>::try_from(peer_bytes) else { continue };
+        let Ok(owner_arr) = <[u8; 32]>::try_from(owner_bytes) else { continue };
         let Ok(peer) = iroh::EndpointId::from_bytes(&id_arr) else { continue };
         let mut offset = 0u64;
         loop {
@@ -303,13 +341,13 @@ pub async fn resync(state: &Arc<AppState>) -> anyhow::Result<String> {
                     let tx = conn.transaction()?;
                     for (hash, size) in rows {
                         tx.execute(
-                            "INSERT INTO placements (blob_hash, peer, size, state, updated_at)
-                             VALUES (?1, ?2, ?3, 'stored', ?4)
-                             ON CONFLICT(blob_hash, peer) DO UPDATE SET
+                            "INSERT INTO placements (blob_hash, device, owner_pk, size, state, updated_at)
+                             VALUES (?1, ?2, ?3, ?4, 'stored', ?5)
+                             ON CONFLICT(blob_hash, device) DO UPDATE SET
                                size = excluded.size,
                                state = CASE WHEN placements.state = 'verified'
                                             THEN 'verified' ELSE 'stored' END",
-                            rusqlite::params![hash.as_slice(), id_arr.as_slice(), size, now],
+                            rusqlite::params![hash.as_slice(), id_arr.as_slice(), owner_arr.as_slice(), size, now],
                         )?;
                     }
                     tx.commit()?;
@@ -512,7 +550,7 @@ async fn prune(state: &Arc<AppState>, cfg: &crate::config::BackupConfig) -> anyh
         }
     }
     for (peer, hashes) in per_peer {
-        if let Err(e) = crate::replicate::release_from_peer(state, peer, &hashes).await {
+        if let Err(e) = crate::replicate::release_from_device(state, peer, &hashes).await {
             tracing::warn!("releasing pruned blobs failed (will retry next tick): {e:#}");
         }
     }
@@ -544,7 +582,7 @@ async fn fetch_missing(
             .db
             .call(move |conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT peer FROM placements
+                    "SELECT device FROM placements
                      WHERE blob_hash = ?1 AND state IN ('stored', 'verified')
                      ORDER BY COALESCE(last_verified, 0) DESC",
                 )?;

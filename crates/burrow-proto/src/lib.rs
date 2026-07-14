@@ -8,4 +8,5 @@ pub mod peer;
 pub const PEER_ALPN: &[u8] = b"burrow/peer/0";
 
 /// Version negotiated in `Hello`; bump on incompatible PeerProto changes.
-pub const PROTO_VERSION: u32 = 0;
+/// v1: owner identity + device certificates.
+pub const PROTO_VERSION: u32 = 1;

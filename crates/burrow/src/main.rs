@@ -59,6 +59,11 @@ enum Command {
         #[command(subcommand)]
         command: PeerCommand,
     },
+    /// Manage your own devices (one identity, many machines)
+    Device {
+        #[command(subcommand)]
+        command: DeviceCommand,
+    },
     /// List peers with grants and liveness
     Peers,
     /// Show pending peerings and space requests
@@ -87,17 +92,37 @@ enum Command {
 
 #[derive(Subcommand)]
 enum PeerCommand {
-    /// Print this node's pairing ticket (send it to a friend)
+    /// Print this device's pairing ticket (send it to a friend)
     Invite,
     /// Add a friend from their pairing ticket
     Add {
         ticket: String,
-        /// Local nickname for this peer
+        /// Local nickname for this person
         #[arg(long)]
         name: String,
     },
-    /// Remove a peer entirely
+    /// Remove a person (and all their devices)
     Remove { name: String },
+}
+
+#[derive(Subcommand)]
+enum DeviceCommand {
+    /// Print this device's ticket for linking another of YOUR devices
+    Link,
+    /// Link this (new) machine to your existing devices: enter your recovery
+    /// phrase and a ticket from any of them
+    Join {
+        /// Ticket from `burrow device link` on an existing device
+        ticket: String,
+        /// Name for THIS device (defaults to hostname)
+        #[arg(long)]
+        device: Option<String>,
+        /// The 24-word phrase (prompted if omitted)
+        #[arg(long)]
+        phrase: Option<String>,
+    },
+    /// List your own devices
+    List,
 }
 
 #[derive(Subcommand)]
@@ -204,6 +229,42 @@ async fn main() -> anyhow::Result<()> {
                 done(call(CtrlRequest::PeerAdd { ticket, name }).await?)
             }
             PeerCommand::Remove { name } => done(call(CtrlRequest::PeerRemove { name }).await?),
+        },
+        Command::Device { command } => match command {
+            DeviceCommand::Link => match call(CtrlRequest::PeerInvite).await? {
+                CtrlOk::Ticket(t) => {
+                    println!("on your new machine, run:\n");
+                    println!("  burrow device join {t} --device <name-for-that-machine>\n");
+                    println!("(it will ask for your recovery phrase — same identity, new device)");
+                    Ok(())
+                }
+                other => anyhow::bail!("unexpected reply: {other:?}"),
+            },
+            DeviceCommand::Join { ticket, device, phrase } => device_join(ticket, device, phrase).await,
+            DeviceCommand::List => {
+                let CtrlOk::Peers(owners) = call(CtrlRequest::PeerList).await? else {
+                    anyhow::bail!("unexpected reply");
+                };
+                let Some(me) = owners.iter().find(|o| o.state == "self") else {
+                    println!("no devices yet");
+                    return Ok(());
+                };
+                println!("{:<16} {:<8} {:<8} {}", "DEVICE", "MODE", "ONLINE", "LAST SEEN");
+                for d in &me.devices {
+                    println!(
+                        "{:<16} {:<8} {:<8} {}",
+                        d.device_name,
+                        d.mode,
+                        match d.online {
+                            Some(true) => "yes",
+                            Some(false) => "no",
+                            None => "(this)",
+                        },
+                        d.last_seen.map(fmt_time).unwrap_or_else(|| "-".into()),
+                    );
+                }
+                Ok(())
+            }
         },
         Command::Peers => peers_table().await,
         Command::Requests => requests_table().await,
@@ -313,14 +374,18 @@ async fn doctor() -> anyhow::Result<()> {
             if peers.is_empty() {
                 println!("  (no peers configured yet)");
             }
-            for p in peers {
+            for p in peers.iter().filter(|p| p.state != "self") {
+                let any_online = p.devices.iter().any(|d| d.online == Some(true));
+                let probed = p.devices.iter().any(|d| d.online.is_some());
                 failures += check(
-                    p.online != Some(false),
+                    any_online || !probed,
                     &format!("peer {}", p.name),
-                    match p.online {
-                        Some(true) => "reachable".into(),
-                        Some(false) => "UNREACHABLE".into(),
-                        None => format!("not probed (state {})", p.state),
+                    if any_online {
+                        "reachable".into()
+                    } else if probed {
+                        "UNREACHABLE (no device online)".into()
+                    } else {
+                        format!("not probed (state {})", p.state)
                     },
                 );
             }
@@ -347,46 +412,87 @@ fn done(reply: CtrlOk) -> anyhow::Result<()> {
 }
 
 async fn peers_table() -> anyhow::Result<()> {
-    let CtrlOk::Peers(peers) = call(CtrlRequest::PeerList).await? else {
+    let CtrlOk::Peers(owners) = call(CtrlRequest::PeerList).await? else {
         anyhow::bail!("unexpected reply");
     };
-    if peers.is_empty() {
+    let friends: Vec<_> = owners.iter().filter(|o| o.state != "self").collect();
+    if friends.is_empty() {
         println!("no peers yet — run `burrow peer invite` and swap tickets with a friend");
         return Ok(());
     }
     let (given, received): (u64, u64) =
-        peers.iter().fold((0, 0), |acc, p| (acc.0 + p.given_bytes, acc.1 + p.received_bytes));
-    println!(
-        "{:<12} {:<10} {:<8} {:<22} {:<22} THEIR NAME",
-        "PEER", "STATE", "ONLINE", "YOU GIVE (used)", "YOU GET (used)"
-    );
-    for p in &peers {
-        let online = match p.online {
-            Some(true) => "yes",
-            Some(false) => "no",
-            None => "-",
-        };
+        friends.iter().fold((0, 0), |acc, p| (acc.0 + p.given_bytes, acc.1 + p.received_bytes));
+    println!("{:<12} {:<10} {:<22} {:<22}", "PEER", "STATE", "YOU GIVE (used)", "YOU GET (used)");
+    for p in &friends {
         let state = if p.state == "active" && p.approved_by_them == Some(false) {
             "await-them".to_string()
         } else {
             p.state.clone()
         };
         println!(
-            "{:<12} {:<10} {:<8} {:<22} {:<22} {}",
+            "{:<12} {:<10} {:<22} {:<22}",
             p.name,
             state,
-            online,
             format!("{} ({})", fmt_bytes(p.given_bytes), fmt_bytes(p.given_used)),
             format!("{} ({})", fmt_bytes(p.received_bytes), fmt_bytes(p.received_used)),
-            p.hello_name.as_deref().unwrap_or("-"),
         );
+        for d in &p.devices {
+            let online = match d.online {
+                Some(true) => "online",
+                Some(false) => "offline",
+                None => "-",
+            };
+            println!("  └ {:<14} {:<8} {}", d.device_name, d.mode, online);
+        }
     }
-    println!(
-        "\nratio: you give {} / you get {}",
-        fmt_bytes(given),
-        fmt_bytes(received)
-    );
+    println!("\nratio: you give {} / you get {}", fmt_bytes(given), fmt_bytes(received));
     Ok(())
+}
+
+async fn device_join(
+    ticket: String,
+    device: Option<String>,
+    phrase: Option<String>,
+) -> anyhow::Result<()> {
+    let key_path = burrow_daemon::paths::repo_key_file();
+    if !key_path.exists() {
+        // Bare machine: recover the identity first.
+        let phrase = match phrase {
+            Some(p) => p,
+            None => {
+                eprintln!("enter your 24-word recovery phrase:");
+                let mut line = String::new();
+                std::io::stdin().read_line(&mut line)?;
+                line
+            }
+        };
+        let key = burrow_core::RepoKey::from_recovery_phrase(phrase.trim())
+            .context("that phrase doesn't decode to a valid repo key")?;
+        burrow_daemon::keys::save_key(&key_path, &key)?;
+        println!("identity recovered to {}", key_path.display());
+    }
+    let name = burrow_daemon::keys::load_or_create_device_name(
+        &burrow_daemon::paths::device_name_file(),
+        device.as_deref(),
+    )?;
+    println!("this device is {name:?}");
+
+    // If the daemon is up, link right away; otherwise leave the ticket for it.
+    match call(CtrlRequest::DeviceJoin { ticket: ticket.clone() }).await {
+        Ok(CtrlOk::Done(msg)) => {
+            println!("{msg}");
+            Ok(())
+        }
+        Ok(other) => anyhow::bail!("unexpected reply: {other:?}"),
+        Err(_) => {
+            std::fs::write(burrow_daemon::paths::join_ticket_file(), ticket)?;
+            println!(
+                "daemon not running — ticket saved; it will link automatically when you run \
+                 `burrow daemon run`"
+            );
+            Ok(())
+        }
+    }
 }
 
 async fn requests_table() -> anyhow::Result<()> {
@@ -400,11 +506,12 @@ async fn requests_table() -> anyhow::Result<()> {
     if !peers.is_empty() {
         println!("pending peerings (approve with `burrow approve <name>`):");
         for p in &peers {
+            let devs: Vec<&str> = p.devices.iter().map(|d| d.device_name.as_str()).collect();
             println!(
-                "  {}  (calls itself {:?}, id {})",
+                "  {}  (owner {}, devices: {})",
                 p.name,
-                p.hello_name.as_deref().unwrap_or("?"),
-                p.endpoint_id.iter().take(4).map(|b| format!("{b:02x}")).collect::<String>(),
+                p.owner_pk.iter().take(4).map(|b| format!("{b:02x}")).collect::<String>(),
+                if devs.is_empty() { "?".into() } else { devs.join(", ") },
             );
         }
     }
@@ -424,41 +531,86 @@ async fn requests_table() -> anyhow::Result<()> {
 }
 
 async fn status() -> anyhow::Result<()> {
-    match call(CtrlRequest::Status).await? {
-        CtrlOk::Status(s) => {
-            println!("burrow {} on {:?}", s.version, s.node_name);
-            println!("data: {}", s.data_dir.display());
-            if s.backups.is_empty() {
-                println!("\nno backups configured — add a [[backup]] block to your config");
-                return Ok(());
-            }
-            println!();
+    let CtrlOk::Status(s) = call(CtrlRequest::Status).await? else {
+        anyhow::bail!("unexpected reply");
+    };
+    println!(
+        "burrow {} — {:?} ({}), device {:?} [{} mode]",
+        s.version,
+        s.node_name,
+        s.owner_pk.iter().take(4).map(|b| format!("{b:02x}")).collect::<String>(),
+        s.device_name,
+        s.mode,
+    );
+    println!("data: {}", s.data_dir.display());
+
+    println!("\nMY BACKUPS");
+    if s.backups.is_empty() {
+        println!("  none configured — add a [[backup]] block to your config");
+    } else {
+        println!(
+            "  {:<12} {:<9} {:<10} {:<20} {:<28} PATHS",
+            "BACKUP", "REPLICAS", "SNAPSHOTS", "LAST RUN", "REPLICATION"
+        );
+        for b in &s.backups {
+            let last = b
+                .last_snapshot
+                .as_ref()
+                .map(|s| fmt_time(s.created_at))
+                .unwrap_or_else(|| "never".into());
+            let paths: Vec<String> = b.paths.iter().map(|p| p.display().to_string()).collect();
             println!(
-                "{:<12} {:<9} {:<10} {:<20} {:<28} PATHS",
-                "BACKUP", "REPLICAS", "SNAPSHOTS", "LAST RUN", "REPLICATION"
+                "  {:<12} {:<9} {:<10} {:<20} {:<28} {}",
+                b.backup_id,
+                b.replicas,
+                b.snapshot_count,
+                last,
+                b.health.summary(),
+                paths.join(", ")
             );
-            for b in &s.backups {
-                let last = b
-                    .last_snapshot
-                    .as_ref()
-                    .map(|s| fmt_time(s.created_at))
-                    .unwrap_or_else(|| "never".into());
-                let paths: Vec<String> =
-                    b.paths.iter().map(|p| p.display().to_string()).collect();
-                println!(
-                    "{:<12} {:<9} {:<10} {:<20} {:<28} {}",
-                    b.backup_id,
-                    b.replicas,
-                    b.snapshot_count,
-                    last,
-                    b.health.summary(),
-                    paths.join(", ")
-                );
-            }
-            Ok(())
         }
-        other => anyhow::bail!("unexpected reply: {other:?}"),
     }
+
+    println!("\nHOSTING (this device)");
+    if s.mode == "client" {
+        println!("  client mode — this device does not host data");
+    } else {
+        let offered = s
+            .hosting
+            .offer_max
+            .map(fmt_bytes)
+            .unwrap_or_else(|| "unlimited (disk-bound)".into());
+        println!("  offering {offered}, holding {} total", fmt_bytes(s.hosting.held_total));
+        if s.hosting.grants.is_empty() {
+            println!("  no grants to friends yet — `burrow grant <peer> <size>`");
+        } else {
+            for (name, granted, used) in &s.hosting.grants {
+                println!("  {:<12} granted {:<10} used {}", name, fmt_bytes(*granted), fmt_bytes(*used));
+            }
+        }
+    }
+
+    // MY DEVICES from the peer list (self owner).
+    if let Ok(CtrlOk::Peers(owners)) = call(CtrlRequest::PeerList).await {
+        if let Some(me) = owners.iter().find(|o| o.state == "self") {
+            if me.devices.len() > 1 {
+                println!("\nMY DEVICES");
+                for d in &me.devices {
+                    let online = if d.endpoint_id == s.endpoint_id {
+                        "(this device)"
+                    } else {
+                        match d.online {
+                            Some(true) => "online",
+                            Some(false) => "offline",
+                            None => "-",
+                        }
+                    };
+                    println!("  {:<16} {:<8} {}", d.device_name, d.mode, online);
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn init(name: Option<String>) -> anyhow::Result<()> {
@@ -469,6 +621,11 @@ fn init(name: Option<String>) -> anyhow::Result<()> {
     let key = burrow_daemon::keys::generate_and_save(&key_path)
         .context("a burrow repo may already be initialized here")?;
     println!("repo key written to {}", key_path.display());
+    let device_name = burrow_daemon::keys::load_or_create_device_name(
+        &burrow_daemon::paths::device_name_file(),
+        None,
+    )?;
+    println!("this device is named {device_name:?} (add more with `burrow device join`)");
 
     let config_path = burrow_daemon::paths::config_file();
     if !config_path.exists() {

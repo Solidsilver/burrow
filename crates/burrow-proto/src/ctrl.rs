@@ -47,6 +47,8 @@ pub enum CtrlRequest {
     RepairNow,
     /// Rebuild the snapshot catalog from what peers hold (disaster recovery).
     Resync,
+    /// Link this device to another of the same owner via its ticket.
+    DeviceJoin { ticket: String },
 }
 
 pub type CtrlResult = Result<CtrlOk, CtrlError>;
@@ -79,24 +81,31 @@ pub enum CtrlOk {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerInfo {
-    /// Local nickname.
+    /// Local nickname for the OWNER (person).
     pub name: String,
-    pub endpoint_id: [u8; 32],
-    /// "active" | "pending_in"
+    pub owner_pk: [u8; 32],
+    /// "active" | "pending_in" | "self"
     pub state: String,
-    /// Their self-reported node name.
-    pub hello_name: Option<String>,
-    pub last_seen: Option<u64>,
-    /// Bytes I reserve for them / of theirs I hold.
+    /// Bytes this device reserves for them / of theirs it holds.
     pub given_bytes: u64,
     pub given_used: u64,
-    /// Bytes they reserve for me / of mine they hold.
+    /// Bytes their devices reserve for me / of mine they hold (summed).
     pub received_bytes: u64,
     pub received_used: u64,
-    /// Result of the live refresh during PeerList; None = not attempted.
-    pub online: Option<bool>,
     /// Whether they've approved us (from last contact).
     pub approved_by_them: Option<bool>,
+    pub devices: Vec<DeviceInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceInfo {
+    pub device_name: String,
+    pub endpoint_id: [u8; 32],
+    /// "host" | "client"
+    pub mode: String,
+    pub last_seen: Option<u64>,
+    /// Result of the live refresh; None = not attempted.
+    pub online: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,10 +121,25 @@ pub struct SpaceRequestInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusInfo {
     pub node_name: String,
+    pub device_name: String,
+    /// "host" | "client"
+    pub mode: String,
     pub version: String,
     pub data_dir: PathBuf,
     pub endpoint_id: [u8; 32],
+    pub owner_pk: [u8; 32],
     pub backups: Vec<BackupStatus>,
+    /// Hosting overview: space offered/used on THIS device.
+    pub hosting: HostingInfo,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct HostingInfo {
+    pub offer_max: Option<u64>,
+    /// Total bytes held for everyone (self + friends).
+    pub held_total: u64,
+    /// (owner name, granted, used) for each granted owner.
+    pub grants: Vec<(String, u64, u64)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

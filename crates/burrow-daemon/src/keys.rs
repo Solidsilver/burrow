@@ -39,6 +39,65 @@ pub fn load(path: &Path) -> anyhow::Result<RepoKey> {
     Ok(RepoKey::from_bytes(bytes))
 }
 
+/// Load the device's stable name, or create it (defaulting to the hostname).
+pub fn load_or_create_device_name(path: &Path, preferred: Option<&str>) -> anyhow::Result<String> {
+    if path.exists() {
+        let name = std::fs::read_to_string(path)?.trim().to_string();
+        if name.is_empty() {
+            bail!("device name file {} is empty", path.display());
+        }
+        if let Some(p) = preferred {
+            if p != name {
+                bail!(
+                    "device is already named {name:?} (in {}); renaming would change \
+                     its identity — move the file away if you really mean to",
+                    path.display()
+                );
+            }
+        }
+        return Ok(name);
+    }
+    let name = match preferred {
+        Some(p) => {
+            // Explicit names must be clean; defaults get sanitized below.
+            if p.is_empty() || !p.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            {
+                bail!("device name {p:?} must be non-empty [a-zA-Z0-9_-]");
+            }
+            p.to_string()
+        }
+        None => {
+            let host = gethostname::gethostname().to_string_lossy().into_owned();
+            let base = host.split('.').next().unwrap_or("device");
+            let clean: String = base
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+                .collect();
+            if clean.is_empty() { "device".to_string() } else { clean }
+        }
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, format!("{name}\n"))?;
+    Ok(name)
+}
+
+/// Write a recovered repo key (shared by init and `burrow recover`).
+pub fn save_key(path: &Path, key: &RepoKey) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let hex: String = key.as_bytes().iter().map(|b| format!("{b:02x}")).collect();
+    std::fs::write(path, hex + "\n")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
