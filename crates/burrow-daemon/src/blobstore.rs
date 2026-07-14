@@ -10,13 +10,27 @@ use iroh_blobs::Hash;
 pub struct IrohBlobStore {
     store: Store,
     handle: tokio::runtime::Handle,
+    /// One temp tag per blob written through `put`. Blobs written by a
+    /// snapshot are not yet in `chunk_refs`, so the GC protect callback
+    /// doesn't know about them; these tags keep them alive until the caller
+    /// has committed that metadata (then drops them via `into_temp_tags`).
+    /// A persistent tag here instead would pin every chunk forever and GC
+    /// could never reclaim pruned data.
+    temp_tags: Vec<iroh_blobs::api::TempTag>,
 }
 
 impl IrohBlobStore {
     /// Must be constructed on a runtime thread (captures the current handle);
     /// used from `spawn_blocking` threads.
     pub fn new(store: Store) -> Self {
-        Self { store, handle: tokio::runtime::Handle::current() }
+        Self { store, handle: tokio::runtime::Handle::current(), temp_tags: Vec::new() }
+    }
+
+    /// Hand over the GC guards for everything written so far. The caller must
+    /// keep them alive until the blobs are protected by metadata (chunk_refs
+    /// rows / a snapshot tag).
+    pub fn into_temp_tags(self) -> Vec<iroh_blobs::api::TempTag> {
+        self.temp_tags
     }
 }
 
@@ -35,10 +49,14 @@ fn io_err(e: impl std::fmt::Display) -> CoreError {
 impl BlobStore for IrohBlobStore {
     fn put(&mut self, bytes: Vec<u8>) -> Result<BlobHash, CoreError> {
         let store = self.store.clone();
-        self.handle.block_on(async move {
-            let tag = store.blobs().add_bytes(bytes).await.map_err(io_err)?;
-            Ok(from_iroh_hash(&tag.hash))
-        })
+        // temp_tag(), not the default with_tag(): the awaited form creates a
+        // persistent auto tag per blob, which would defeat GC forever.
+        let tag = self.handle.block_on(async move {
+            store.blobs().add_bytes(bytes).temp_tag().await.map_err(io_err)
+        })?;
+        let hash = from_iroh_hash(tag.as_ref());
+        self.temp_tags.push(tag);
+        Ok(hash)
     }
 
     fn get(&self, hash: &BlobHash) -> Result<Vec<u8>, CoreError> {

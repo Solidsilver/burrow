@@ -109,6 +109,16 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         .with_context(|| format!("opening blob store {}", blobs_dir.display()))?;
     let blobs: iroh_blobs::api::Store = (*fs_store).clone();
 
+    // Earlier versions added every blob via add_bytes().await, which creates
+    // a persistent `auto-…` tag per blob and pinned all data forever. Our
+    // blobs are protected by the GC callback + `snapshot/…` tags, so any
+    // auto tags are that legacy leak — drop them.
+    match blobs.tags().delete_prefix("auto-").await {
+        Ok(n) if n > 0 => tracing::info!(deleted = n, "removed legacy per-blob auto tags"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!("legacy auto tag cleanup failed: {e}"),
+    }
+
     let device_name =
         crate::keys::load_or_create_device_name(&crate::paths::device_name_file(), None)?;
     let endpoint =

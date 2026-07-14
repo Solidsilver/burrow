@@ -180,12 +180,17 @@ pub async fn backup_run(state: &Arc<AppState>, backup_id: &str) -> anyhow::Resul
 
     let store = state.blobs.clone();
     let repo_key = state.repo_key.clone();
-    let result = tokio::task::spawn_blocking(move || {
+    // `gc_guards` are the temp tags for every blob this snapshot wrote; they
+    // must stay alive until the chunk_refs rows below are committed, or a GC
+    // pass could delete mid-backup data before the protect callback knows it.
+    let (result, gc_guards) = tokio::task::spawn_blocking(move || {
         let mut adapter = IrohBlobStore::new(store);
-        create_snapshot(&mut adapter, &repo_key, &roots, &opts, &old_cache)
+        let result = create_snapshot(&mut adapter, &repo_key, &roots, &opts, &old_cache);
+        (result, adapter.into_temp_tags())
     })
     .await
-    .context("backup task panicked")??;
+    .context("backup task panicked")?;
+    let result = result?;
 
     // Persist the fresh cache (replaces the old one wholesale, so deleted
     // files don't linger).
@@ -306,6 +311,8 @@ pub async fn backup_run(state: &Arc<AppState>, backup_id: &str) -> anyhow::Resul
             })
             .await?;
     }
+    // chunk_refs are committed; the GC protect callback covers everything now.
+    drop(gc_guards);
 
     if let Err(e) = prune(state, cfg).await {
         tracing::warn!(backup = %cfg.id, "pruning failed: {e:#}");
