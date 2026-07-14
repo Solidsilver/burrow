@@ -1,2 +1,11 @@
-//! Daemon internals arrive in M2 (config, SQLite, control socket) and M3
-//! (iroh Router, PeerProto, per-peer blob authorization).
+//! The burrow daemon: local snapshot engine (M2), peering/contracts (M3),
+//! replication (M4), repair (M5).
+
+pub mod blobstore;
+pub mod config;
+pub mod ctrl;
+pub mod daemon;
+pub mod db;
+pub mod keys;
+pub mod ops;
+pub mod paths;

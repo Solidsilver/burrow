@@ -14,4 +14,8 @@ path = "src/main.rs"
 burrow-core.workspace = true
 burrow-proto.workspace = true
 burrow-daemon.workspace = true
+anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "signal"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }

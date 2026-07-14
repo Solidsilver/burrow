@@ -1,0 +1,58 @@
+//! Control socket server: accepts unix-socket connections from the CLI and
+//! dispatches framed `CtrlRequest`s.
+
+use std::sync::Arc;
+
+use burrow_proto::ctrl::{read_frame, write_frame, CtrlError, CtrlOk, CtrlRequest, CtrlResult};
+use tokio::net::{UnixListener, UnixStream};
+
+use crate::daemon::AppState;
+
+pub async fn serve(state: Arc<AppState>, listener: UnixListener) {
+    loop {
+        match listener.accept().await {
+            Ok((stream, _)) => {
+                let state = state.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = handle_conn(state, stream).await {
+                        tracing::debug!("control connection ended: {e}");
+                    }
+                });
+            }
+            Err(e) => {
+                tracing::warn!("control socket accept failed: {e}");
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        }
+    }
+}
+
+async fn handle_conn(state: Arc<AppState>, mut stream: UnixStream) -> std::io::Result<()> {
+    loop {
+        let req: CtrlRequest = match read_frame(&mut stream).await {
+            Ok(req) => req,
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        let result: CtrlResult = dispatch(&state, req).await.map_err(|e| CtrlError(format!("{e:#}")));
+        write_frame(&mut stream, &result).await?;
+    }
+}
+
+async fn dispatch(state: &Arc<AppState>, req: CtrlRequest) -> anyhow::Result<CtrlOk> {
+    match req {
+        CtrlRequest::Ping => Ok(CtrlOk::Pong),
+        CtrlRequest::Status => Ok(CtrlOk::Status(crate::ops::status(state).await?)),
+        CtrlRequest::BackupRun { backup_id } => {
+            Ok(CtrlOk::BackupDone(crate::ops::backup_run(state, &backup_id).await?))
+        }
+        CtrlRequest::SnapshotList { backup_id } => {
+            Ok(CtrlOk::Snapshots(crate::ops::snapshot_list(state, backup_id).await?))
+        }
+        CtrlRequest::Restore { backup_id, snapshot, target } => {
+            let (files, bytes, target) =
+                crate::ops::restore(state, &backup_id, snapshot, target).await?;
+            Ok(CtrlOk::RestoreDone { files, bytes, target })
+        }
+    }
+}

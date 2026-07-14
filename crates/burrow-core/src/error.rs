@@ -20,6 +20,8 @@ pub enum CoreError {
     RecoveryPhrase(String),
     #[error("path {0:?} escapes the restore target")]
     PathEscape(std::path::PathBuf),
+    #[error("{0}")]
+    Pattern(String),
 }
 
 pub type Result<T, E = CoreError> = std::result::Result<T, E>;

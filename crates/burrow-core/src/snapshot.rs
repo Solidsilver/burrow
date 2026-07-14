@@ -1,6 +1,10 @@
-//! Build a snapshot of a directory tree into a blob store, and restore one
-//! back out. Pure filesystem + store logic; the daemon supplies scheduling,
-//! placement, and networking around this.
+//! Build a snapshot of one or more directory trees into a blob store, and
+//! restore back out. Pure filesystem + store logic; the daemon supplies
+//! scheduling, placement, and networking around this.
+//!
+//! A snapshot may cover multiple roots (like `tar /a /b`): every entry's
+//! manifest path is the root's absolute path with the leading slash removed,
+//! so `/home/luke/photos/x.jpg` restores under `<target>/home/luke/photos/`.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -18,9 +22,9 @@ pub struct SnapshotOptions {
     pub node_name: String,
     /// Unix seconds; injected so core stays deterministic/clock-free.
     pub created_at: u64,
-    /// Glob-free exclusion for now: any path component equal to one of these
-    /// is skipped. Real glob matching arrives with the daemon config layer.
-    pub exclude_names: Vec<String>,
+    /// Glob patterns matched against each entry's root-relative path
+    /// (e.g. `*.tmp`, `.cache/**`, `node_modules`).
+    pub exclude: Vec<String>,
 }
 
 pub struct SnapshotResult {
@@ -34,67 +38,89 @@ pub struct SnapshotResult {
     pub bytes_new: u64,
 }
 
-/// Walk `root`, chunk+seal every file, store blobs, and store the sealed
+/// Walk each root, chunk+seal every file, store blobs, and store the sealed
 /// manifest. Deduplication is inherent: sealing is deterministic, so unchanged
 /// content maps to blobs the store already has.
 pub fn create_snapshot<S: BlobStore>(
     store: &mut S,
     key: &RepoKey,
-    root: &Path,
+    roots: &[PathBuf],
     opts: &SnapshotOptions,
 ) -> Result<SnapshotResult> {
-    // BTreeMap keyed by relative path => deterministic manifest ordering.
+    let excludes = build_globset(&opts.exclude)?;
+    // BTreeMap keyed by manifest path => deterministic manifest ordering.
     let mut entries: BTreeMap<String, Entry> = BTreeMap::new();
     let mut new_blobs = Vec::new();
     let mut bytes_scanned = 0u64;
     let mut bytes_new = 0u64;
+    let mut manifest_roots = Vec::new();
 
-    let walker = walkdir::WalkDir::new(root).follow_links(false).into_iter();
-    for item in walker.filter_entry(|e| {
-        e.depth() == 0
-            || !opts
-                .exclude_names
-                .iter()
-                .any(|x| e.file_name().to_string_lossy().as_ref() == x)
-    }) {
-        let item = item.map_err(|e| CoreError::Io(std::io::Error::other(e.to_string())))?;
-        if item.depth() == 0 {
-            continue; // the root itself is implicit
-        }
-        let rel = relative_path_string(item.path(), root)?;
-        let meta = item.metadata().map_err(|e| CoreError::Io(std::io::Error::other(e.to_string())))?;
-        let (mode, mtime) = mode_and_mtime(&meta);
+    for root in roots {
+        let root_abs = std::path::absolute(root)?;
+        let prefix = path_to_manifest_string(&root_abs);
+        manifest_roots.push(prefix.clone());
 
-        let kind = if item.file_type().is_dir() {
-            EntryKind::Dir
-        } else if item.file_type().is_symlink() {
-            let target = fs::read_link(item.path())?;
-            EntryKind::Symlink { target: target.to_string_lossy().into_owned() }
-        } else if item.file_type().is_file() {
-            let mut chunks = Vec::new();
-            let reader = BufReader::new(fs::File::open(item.path())?);
-            for chunk in chunk_stream(reader) {
-                let plaintext = chunk?;
-                bytes_scanned += plaintext.len() as u64;
-                let sealed = key.seal_chunk(&plaintext);
-                if !store.contains(&sealed.blob_hash) {
-                    bytes_new += sealed.blob.len() as u64;
-                    let stored = store.put(sealed.blob)?;
-                    debug_assert_eq!(stored, sealed.blob_hash);
-                    new_blobs.push(sealed.blob_hash);
+        let walker = walkdir::WalkDir::new(&root_abs)
+            .follow_links(false)
+            .sort_by_file_name()
+            .into_iter();
+        let mut iter = walker.filter_entry(|e| {
+            e.depth() == 0
+                || e.path()
+                    .strip_prefix(&root_abs)
+                    .map(|rel| !excludes.is_match(rel))
+                    .unwrap_or(true)
+        });
+        while let Some(item) = iter.next() {
+            let item = item.map_err(|e| CoreError::Io(std::io::Error::other(e.to_string())))?;
+            let rel_in_root = item
+                .path()
+                .strip_prefix(&root_abs)
+                .map_err(|_| CoreError::PathEscape(item.path().to_path_buf()))?
+                .to_path_buf();
+            let manifest_path = if rel_in_root.as_os_str().is_empty() {
+                prefix.clone()
+            } else {
+                format!("{prefix}/{}", path_to_manifest_string(&rel_in_root))
+            };
+            let meta =
+                item.metadata().map_err(|e| CoreError::Io(std::io::Error::other(e.to_string())))?;
+            let (mode, mtime) = mode_and_mtime(&meta);
+
+            let kind = if item.file_type().is_dir() {
+                EntryKind::Dir
+            } else if item.file_type().is_symlink() {
+                let target = fs::read_link(item.path())?;
+                EntryKind::Symlink { target: target.to_string_lossy().into_owned() }
+            } else if item.file_type().is_file() {
+                let mut chunks = Vec::new();
+                let reader = BufReader::new(fs::File::open(item.path())?);
+                for chunk in chunk_stream(reader) {
+                    let plaintext = chunk?;
+                    bytes_scanned += plaintext.len() as u64;
+                    let sealed = key.seal_chunk(&plaintext);
+                    if !store.contains(&sealed.blob_hash) {
+                        bytes_new += sealed.blob.len() as u64;
+                        let stored = store.put(sealed.blob)?;
+                        debug_assert_eq!(stored, sealed.blob_hash);
+                        new_blobs.push(sealed.blob_hash);
+                    }
+                    chunks.push(ChunkRef {
+                        plain_id: sealed.plain_id,
+                        blob_hash: sealed.blob_hash,
+                        size: plaintext.len() as u32,
+                    });
                 }
-                chunks.push(ChunkRef {
-                    plain_id: sealed.plain_id,
-                    blob_hash: sealed.blob_hash,
-                    size: plaintext.len() as u32,
-                });
-            }
-            EntryKind::File { size: meta.len(), chunks }
-        } else {
-            continue; // sockets, fifos, devices: not backed up
-        };
+                EntryKind::File { size: meta.len(), chunks }
+            } else {
+                continue; // sockets, fifos, devices: not backed up
+            };
 
-        entries.insert(rel.clone(), Entry { path: rel, kind, mode, mtime });
+            entries.insert(
+                manifest_path.clone(),
+                Entry { path: manifest_path, kind, mode, mtime },
+            );
+        }
     }
 
     let manifest = Manifest {
@@ -102,6 +128,7 @@ pub fn create_snapshot<S: BlobStore>(
         backup_id: opts.backup_id.clone(),
         node_name: opts.node_name.clone(),
         created_at: opts.created_at,
+        roots: manifest_roots,
         entries: entries.into_values().collect(),
     };
     let sealed = manifest.seal(key);
@@ -110,8 +137,8 @@ pub fn create_snapshot<S: BlobStore>(
     Ok(SnapshotResult { manifest, manifest_hash, new_blobs, bytes_scanned, bytes_new })
 }
 
-/// Restore a snapshot into `target` (created if missing; must be empty or
-/// non-existent to avoid clobbering).
+/// Restore a snapshot into `target` (created if missing). Existing files in
+/// the way are overwritten; the caller decides whether that's acceptable.
 pub fn restore_snapshot<S: BlobStore>(
     store: &S,
     key: &RepoKey,
@@ -130,7 +157,12 @@ pub fn restore_snapshot<S: BlobStore>(
                     fs::create_dir_all(parent)?;
                 }
                 #[cfg(unix)]
-                std::os::unix::fs::symlink(link_target, &dest)?;
+                {
+                    if dest.symlink_metadata().is_ok() {
+                        fs::remove_file(&dest)?;
+                    }
+                    std::os::unix::fs::symlink(link_target, &dest)?;
+                }
                 #[cfg(not(unix))]
                 let _ = link_target; // symlink restore is unix-only for now
             }
@@ -159,13 +191,25 @@ pub fn restore_snapshot<S: BlobStore>(
     Ok(manifest)
 }
 
-fn relative_path_string(path: &Path, root: &Path) -> Result<String> {
-    let rel = path.strip_prefix(root).map_err(|_| CoreError::PathEscape(path.to_path_buf()))?;
-    Ok(rel
-        .components()
-        .map(|c| c.as_os_str().to_string_lossy())
+fn build_globset(patterns: &[String]) -> Result<globset::GlobSet> {
+    let mut builder = globset::GlobSetBuilder::new();
+    for p in patterns {
+        let glob = globset::Glob::new(p)
+            .map_err(|e| CoreError::Pattern(format!("bad exclude pattern {p:?}: {e}")))?;
+        builder.add(glob);
+    }
+    builder.build().map_err(|e| CoreError::Pattern(e.to_string()))
+}
+
+/// `/`-joined path string with no leading separator (manifest path form).
+fn path_to_manifest_string(path: &Path) -> String {
+    path.components()
+        .filter_map(|c| match c {
+            Component::Normal(s) => Some(s.to_string_lossy()),
+            _ => None,
+        })
         .collect::<Vec<_>>()
-        .join("/"))
+        .join("/")
 }
 
 /// Join a manifest-relative path onto the target, rejecting traversal.
@@ -225,7 +269,7 @@ mod tests {
             backup_id: "test".into(),
             node_name: "unit".into(),
             created_at: 1_700_000_000,
-            exclude_names: vec![".cache".into()],
+            exclude: vec![".cache/**".into(), ".cache".into(), "*.tmp".into()],
         }
     }
 
@@ -233,10 +277,16 @@ mod tests {
         fs::create_dir_all(root.join("sub/deep")).unwrap();
         fs::create_dir_all(root.join(".cache")).unwrap();
         fs::write(root.join("hello.txt"), b"hello burrow").unwrap();
+        fs::write(root.join("scratch.tmp"), b"tempfile").unwrap();
         fs::write(root.join("sub/deep/data.bin"), vec![0xAB; 3 * 1024 * 1024]).unwrap();
         fs::write(root.join(".cache/skipme"), b"ephemeral").unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink("hello.txt", root.join("link")).unwrap();
+    }
+
+    fn prefixed(root: &Path, rel: &str) -> String {
+        let abs = std::path::absolute(root).unwrap();
+        format!("{}/{}", path_to_manifest_string(&abs), rel)
     }
 
     #[test]
@@ -244,40 +294,68 @@ mod tests {
         let src = tempfile::tempdir().unwrap();
         build_tree(src.path());
         let mut store = MemStore::new();
-        let result = create_snapshot(&mut store, &testkey(), src.path(), &opts()).unwrap();
+        let result =
+            create_snapshot(&mut store, &testkey(), &[src.path().to_path_buf()], &opts()).unwrap();
 
-        assert!(result.manifest.entries.iter().all(|e| e.path != ".cache/skipme"));
+        let paths: Vec<&str> = result.manifest.entries.iter().map(|e| e.path.as_str()).collect();
+        assert!(!paths.iter().any(|p| p.contains(".cache") || p.ends_with(".tmp")), "{paths:?}");
 
         let dst = tempfile::tempdir().unwrap();
         let target = dst.path().join("restored");
         restore_snapshot(&store, &testkey(), &result.manifest_hash, &target).unwrap();
 
-        assert_eq!(fs::read(target.join("hello.txt")).unwrap(), b"hello burrow");
+        let restored_root = target.join(prefixed(src.path(), "hello.txt"));
+        assert_eq!(fs::read(&restored_root).unwrap(), b"hello burrow");
         assert_eq!(
-            fs::read(target.join("sub/deep/data.bin")).unwrap(),
+            fs::read(target.join(prefixed(src.path(), "sub/deep/data.bin"))).unwrap(),
             vec![0xAB; 3 * 1024 * 1024]
         );
-        assert!(!target.join(".cache").exists());
         #[cfg(unix)]
-        assert_eq!(fs::read_link(target.join("link")).unwrap(), Path::new("hello.txt"));
+        assert_eq!(
+            fs::read_link(target.join(prefixed(src.path(), "link"))).unwrap(),
+            Path::new("hello.txt")
+        );
+    }
+
+    #[test]
+    fn multi_root_snapshot() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        fs::write(a.path().join("a.txt"), b"aaa").unwrap();
+        fs::write(b.path().join("b.txt"), b"bbb").unwrap();
+        let mut store = MemStore::new();
+        let result = create_snapshot(
+            &mut store,
+            &testkey(),
+            &[a.path().to_path_buf(), b.path().to_path_buf()],
+            &opts(),
+        )
+        .unwrap();
+        assert_eq!(result.manifest.roots.len(), 2);
+
+        let dst = tempfile::tempdir().unwrap();
+        restore_snapshot(&store, &testkey(), &result.manifest_hash, dst.path()).unwrap();
+        assert_eq!(fs::read(dst.path().join(prefixed(a.path(), "a.txt"))).unwrap(), b"aaa");
+        assert_eq!(fs::read(dst.path().join(prefixed(b.path(), "b.txt"))).unwrap(), b"bbb");
     }
 
     #[test]
     fn incremental_snapshot_dedups_unchanged_content() {
         let src = tempfile::tempdir().unwrap();
         build_tree(src.path());
+        let roots = [src.path().to_path_buf()];
         let mut store = MemStore::new();
-        let first = create_snapshot(&mut store, &testkey(), src.path(), &opts()).unwrap();
+        let first = create_snapshot(&mut store, &testkey(), &roots, &opts()).unwrap();
         assert!(!first.new_blobs.is_empty());
 
         // No changes: second snapshot must write zero new data blobs.
-        let second = create_snapshot(&mut store, &testkey(), src.path(), &opts()).unwrap();
+        let second = create_snapshot(&mut store, &testkey(), &roots, &opts()).unwrap();
         assert!(second.new_blobs.is_empty(), "unchanged tree re-uploaded {:?}", second.new_blobs);
         assert_eq!(second.bytes_new, 0);
 
         // Touch one small file: only that file's chunk should be new.
         fs::write(src.path().join("hello.txt"), b"hello again").unwrap();
-        let third = create_snapshot(&mut store, &testkey(), src.path(), &opts()).unwrap();
+        let third = create_snapshot(&mut store, &testkey(), &roots, &opts()).unwrap();
         assert_eq!(third.new_blobs.len(), 1);
     }
 
@@ -289,6 +367,7 @@ mod tests {
             backup_id: "evil".into(),
             node_name: "unit".into(),
             created_at: 0,
+            roots: vec![],
             entries: vec![Entry {
                 path: "../escape".into(),
                 kind: EntryKind::Dir,

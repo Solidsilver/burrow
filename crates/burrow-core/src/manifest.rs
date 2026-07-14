@@ -20,6 +20,8 @@ pub struct Manifest {
     pub node_name: String,
     /// Unix seconds. Supplied by the caller (core stays clock-free).
     pub created_at: u64,
+    /// Absolute source roots (manifest path form, no leading slash).
+    pub roots: Vec<String>,
     pub entries: Vec<Entry>,
 }
 

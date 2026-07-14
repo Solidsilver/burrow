@@ -17,6 +17,7 @@ zeroize = { version = "1", features = ["derive"] }
 bip39 = "2"
 getrandom = "0.3"
 walkdir = "2"
+globset = "0.4"
 filetime = "0.2"
 
 [dev-dependencies]

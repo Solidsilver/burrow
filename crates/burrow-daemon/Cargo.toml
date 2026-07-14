@@ -10,3 +10,16 @@ repository.workspace = true
 burrow-core.workspace = true
 burrow-proto.workspace = true
 tracing.workspace = true
+serde.workspace = true
+anyhow = "1"
+tokio = { version = "1", features = ["full"] }
+iroh-blobs = { version = "0.103", features = ["fs-store"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite_migration = "2"
+toml = "0.9"
+gethostname = "1"
+blake3.workspace = true
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
