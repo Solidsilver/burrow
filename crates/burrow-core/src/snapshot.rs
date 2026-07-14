@@ -22,8 +22,10 @@ pub struct SnapshotOptions {
     pub node_name: String,
     /// Unix seconds; injected so core stays deterministic/clock-free.
     pub created_at: u64,
-    /// Glob patterns matched against each entry's root-relative path
-    /// (e.g. `*.tmp`, `.cache/**`, `node_modules`).
+    /// Exclude globs. Patterns without `/` match any single path component at
+    /// any depth (`node_modules` prunes every node_modules dir; `*.tmp` any
+    /// tmp file). Patterns with `/` are anchored to the backup root and `*`
+    /// stops at separators (`.cache/**`, `build/*.o`).
     pub exclude: Vec<String>,
     /// Files whose mtime (unix seconds) is at or after this cutoff are never
     /// entered into the skip-cache: an mtime that fresh can't prove the file
@@ -267,14 +269,44 @@ pub fn restore_snapshot<S: BlobStore>(
     Ok(manifest)
 }
 
-fn build_globset(patterns: &[String]) -> Result<globset::GlobSet> {
-    let mut builder = globset::GlobSetBuilder::new();
-    for p in patterns {
-        let glob = globset::Glob::new(p)
-            .map_err(|e| CoreError::Pattern(format!("bad exclude pattern {p:?}: {e}")))?;
-        builder.add(glob);
+/// See `SnapshotOptions::exclude` for the matching rules.
+struct Excludes {
+    /// Patterns containing `/`: anchored to the backup root, `*` does not
+    /// cross separators (use `**` to descend).
+    anchored: globset::GlobSet,
+    /// Patterns without `/`: matched against every individual path component.
+    component: globset::GlobSet,
+}
+
+impl Excludes {
+    fn is_match(&self, rel: &Path) -> bool {
+        self.anchored.is_match(rel)
+            || rel.components().any(|c| match c {
+                Component::Normal(s) => self.component.is_match(Path::new(s)),
+                _ => false,
+            })
     }
-    builder.build().map_err(|e| CoreError::Pattern(e.to_string()))
+}
+
+fn build_globset(patterns: &[String]) -> Result<Excludes> {
+    let mut anchored = globset::GlobSetBuilder::new();
+    let mut component = globset::GlobSetBuilder::new();
+    for p in patterns {
+        let has_sep = p.contains('/');
+        let glob = globset::GlobBuilder::new(p)
+            .literal_separator(has_sep)
+            .build()
+            .map_err(|e| CoreError::Pattern(format!("bad exclude pattern {p:?}: {e}")))?;
+        if has_sep {
+            anchored.add(glob);
+        } else {
+            component.add(glob);
+        }
+    }
+    Ok(Excludes {
+        anchored: anchored.build().map_err(|e| CoreError::Pattern(e.to_string()))?,
+        component: component.build().map_err(|e| CoreError::Pattern(e.to_string()))?,
+    })
 }
 
 /// `/`-joined path string with no leading separator (manifest path form).
@@ -503,6 +535,62 @@ mod tests {
         assert!(second.bytes_scanned > 0, "hot file must be re-read");
         // Content unchanged, so dedup still means no new blobs.
         assert!(second.new_blobs.is_empty());
+    }
+
+    #[test]
+    fn excludes_match_components_at_any_depth() {
+        let src = tempfile::tempdir().unwrap();
+        fs::create_dir_all(src.path().join("app/node_modules/dep")).unwrap();
+        fs::create_dir_all(src.path().join("app/src")).unwrap();
+        fs::write(src.path().join("app/node_modules/dep/big.js"), b"dep").unwrap();
+        fs::write(src.path().join("app/src/main.rs"), b"code").unwrap();
+        fs::write(src.path().join("app/src/junk.tmp"), b"junk").unwrap();
+
+        let mut store = MemStore::new();
+        let snapshot_opts = SnapshotOptions {
+            exclude: vec!["node_modules".into(), "*.tmp".into()],
+            ..opts()
+        };
+        let result = create_snapshot(
+            &mut store,
+            &testkey(),
+            &[src.path().to_path_buf()],
+            &snapshot_opts,
+            &FileCache::new(),
+        )
+        .unwrap();
+        let paths: Vec<&str> = result.manifest.entries.iter().map(|e| e.path.as_str()).collect();
+        assert!(
+            !paths.iter().any(|p| p.contains("node_modules") || p.ends_with(".tmp")),
+            "nested excludes must apply: {paths:?}"
+        );
+        assert!(paths.iter().any(|p| p.ends_with("main.rs")));
+    }
+
+    #[test]
+    fn anchored_excludes_stay_anchored() {
+        let src = tempfile::tempdir().unwrap();
+        fs::create_dir_all(src.path().join("cache")).unwrap();
+        fs::create_dir_all(src.path().join("keep/cache")).unwrap();
+        fs::write(src.path().join("cache/drop.txt"), b"x").unwrap();
+        fs::write(src.path().join("keep/cache/keep.txt"), b"y").unwrap();
+
+        let mut store = MemStore::new();
+        let snapshot_opts = SnapshotOptions { exclude: vec!["cache/**".into()], ..opts() };
+        let result = create_snapshot(
+            &mut store,
+            &testkey(),
+            &[src.path().to_path_buf()],
+            &snapshot_opts,
+            &FileCache::new(),
+        )
+        .unwrap();
+        let paths: Vec<&str> = result.manifest.entries.iter().map(|e| e.path.as_str()).collect();
+        assert!(!paths.iter().any(|p| p.ends_with("drop.txt")), "{paths:?}");
+        assert!(
+            paths.iter().any(|p| p.ends_with("keep/cache/keep.txt")),
+            "anchored pattern must not match nested dirs: {paths:?}"
+        );
     }
 
     #[test]
