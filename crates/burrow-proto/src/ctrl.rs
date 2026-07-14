@@ -49,6 +49,10 @@ pub enum CtrlRequest {
     Resync,
     /// Link this device to another of the same owner via its ticket.
     DeviceJoin { ticket: String },
+    /// Suspend scheduled backups + replication (until resumed, or for a
+    /// duration in seconds).
+    Pause { seconds: Option<u64> },
+    Resume,
 }
 
 pub type CtrlResult = Result<CtrlOk, CtrlError>;
@@ -189,6 +193,10 @@ pub struct SnapshotInfo {
     pub bytes_scanned: u64,
     pub bytes_new: u64,
     pub chunk_count: u64,
+    /// Files skipped via the unchanged-file cache (fresh runs only; 0 when
+    /// listed from history).
+    #[serde(default)]
+    pub files_cached: u64,
 }
 
 pub async fn write_frame<W, T>(w: &mut W, msg: &T) -> std::io::Result<()>

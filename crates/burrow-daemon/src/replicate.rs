@@ -31,6 +31,9 @@ pub fn spawn_replication_loop(state: std::sync::Weak<AppState>) {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(300)).await;
             let Some(state) = state.upgrade() else { break };
+            if state.is_paused() {
+                continue;
+            }
             if crate::sys::on_battery() && !state.config.device.run_on_battery {
                 tracing::debug!("on battery — skipping replication tick");
                 continue;

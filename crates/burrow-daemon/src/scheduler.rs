@@ -19,6 +19,9 @@ pub fn spawn_scheduler(state: std::sync::Weak<AppState>) {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             let Some(state) = state.upgrade() else { break };
+            if state.is_paused() {
+                continue; // missed runs fire after resume
+            }
             if crate::sys::on_battery() && !state.config.device.run_on_battery {
                 // Don't advance last_check: missed runs fire once we're back
                 // on AC, anacron-style.

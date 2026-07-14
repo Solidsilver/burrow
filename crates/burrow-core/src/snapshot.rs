@@ -27,6 +27,17 @@ pub struct SnapshotOptions {
     pub exclude: Vec<String>,
 }
 
+/// Skip-unchanged-files cache: manifest path -> (size, mtime, chunk refs).
+/// A hit means the file wasn't even read; its chunk refs are reused verbatim.
+pub type FileCache = std::collections::HashMap<String, FileCacheEntry>;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FileCacheEntry {
+    pub size: u64,
+    pub mtime: i64,
+    pub chunks: Vec<ChunkRef>,
+}
+
 pub struct SnapshotResult {
     pub manifest: Manifest,
     /// Hash of the sealed manifest blob (already in the store).
@@ -36,8 +47,14 @@ pub struct SnapshotResult {
     pub new_blobs: Vec<BlobHash>,
     /// Stored (sealed) size of the manifest blob.
     pub manifest_size: u64,
+    /// Bytes actually read and chunked (cache hits don't count).
     pub bytes_scanned: u64,
     pub bytes_new: u64,
+    /// Files skipped via the mtime cache.
+    pub files_cached: u64,
+    /// Fresh cache reflecting exactly this snapshot's files; persist it and
+    /// pass it to the next run.
+    pub cache: FileCache,
 }
 
 /// Walk each root, chunk+seal every file, store blobs, and store the sealed
@@ -48,6 +65,7 @@ pub fn create_snapshot<S: BlobStore>(
     key: &RepoKey,
     roots: &[PathBuf],
     opts: &SnapshotOptions,
+    old_cache: &FileCache,
 ) -> Result<SnapshotResult> {
     let excludes = build_globset(&opts.exclude)?;
     // BTreeMap keyed by manifest path => deterministic manifest ordering.
@@ -55,6 +73,8 @@ pub fn create_snapshot<S: BlobStore>(
     let mut new_blobs = Vec::new();
     let mut bytes_scanned = 0u64;
     let mut bytes_new = 0u64;
+    let mut files_cached = 0u64;
+    let mut new_cache = FileCache::new();
     let mut manifest_roots = Vec::new();
 
     for root in roots {
@@ -95,24 +115,41 @@ pub fn create_snapshot<S: BlobStore>(
                 let target = fs::read_link(item.path())?;
                 EntryKind::Symlink { target: target.to_string_lossy().into_owned() }
             } else if item.file_type().is_file() {
-                let mut chunks = Vec::new();
-                let reader = BufReader::new(fs::File::open(item.path())?);
-                for chunk in chunk_stream(reader) {
-                    let plaintext = chunk?;
-                    bytes_scanned += plaintext.len() as u64;
-                    let sealed = key.seal_chunk(&plaintext);
-                    if !store.contains(&sealed.blob_hash) {
-                        bytes_new += sealed.blob.len() as u64;
-                        let stored = store.put(sealed.blob)?;
-                        debug_assert_eq!(stored, sealed.blob_hash);
-                        new_blobs.push(sealed.blob_hash);
+                // Cache hit: same size+mtime and every chunk still stored —
+                // reuse the refs without reading the file at all.
+                let cached = old_cache.get(&manifest_path).filter(|c| {
+                    c.size == meta.len()
+                        && c.mtime == mtime
+                        && c.chunks.iter().all(|r| store.contains(&r.blob_hash))
+                });
+                let chunks = if let Some(hit) = cached {
+                    files_cached += 1;
+                    hit.chunks.clone()
+                } else {
+                    let mut chunks = Vec::new();
+                    let reader = BufReader::new(fs::File::open(item.path())?);
+                    for chunk in chunk_stream(reader) {
+                        let plaintext = chunk?;
+                        bytes_scanned += plaintext.len() as u64;
+                        let sealed = key.seal_chunk(&plaintext);
+                        if !store.contains(&sealed.blob_hash) {
+                            bytes_new += sealed.blob.len() as u64;
+                            let stored = store.put(sealed.blob)?;
+                            debug_assert_eq!(stored, sealed.blob_hash);
+                            new_blobs.push(sealed.blob_hash);
+                        }
+                        chunks.push(ChunkRef {
+                            plain_id: sealed.plain_id,
+                            blob_hash: sealed.blob_hash,
+                            size: plaintext.len() as u32,
+                        });
                     }
-                    chunks.push(ChunkRef {
-                        plain_id: sealed.plain_id,
-                        blob_hash: sealed.blob_hash,
-                        size: plaintext.len() as u32,
-                    });
-                }
+                    chunks
+                };
+                new_cache.insert(
+                    manifest_path.clone(),
+                    FileCacheEntry { size: meta.len(), mtime, chunks: chunks.clone() },
+                );
                 EntryKind::File { size: meta.len(), chunks }
             } else {
                 continue; // sockets, fifos, devices: not backed up
@@ -137,7 +174,16 @@ pub fn create_snapshot<S: BlobStore>(
     let manifest_size = sealed.blob.len() as u64;
     let manifest_hash = store.put(sealed.blob)?;
 
-    Ok(SnapshotResult { manifest, manifest_hash, new_blobs, manifest_size, bytes_scanned, bytes_new })
+    Ok(SnapshotResult {
+        manifest,
+        manifest_hash,
+        new_blobs,
+        manifest_size,
+        bytes_scanned,
+        bytes_new,
+        files_cached,
+        cache: new_cache,
+    })
 }
 
 /// Restore a snapshot into `target` (created if missing). Existing files in
@@ -298,7 +344,7 @@ mod tests {
         build_tree(src.path());
         let mut store = MemStore::new();
         let result =
-            create_snapshot(&mut store, &testkey(), &[src.path().to_path_buf()], &opts()).unwrap();
+            create_snapshot(&mut store, &testkey(), &[src.path().to_path_buf()], &opts(), &FileCache::new()).unwrap();
 
         let paths: Vec<&str> = result.manifest.entries.iter().map(|e| e.path.as_str()).collect();
         assert!(!paths.iter().any(|p| p.contains(".cache") || p.ends_with(".tmp")), "{paths:?}");
@@ -332,6 +378,7 @@ mod tests {
             &testkey(),
             &[a.path().to_path_buf(), b.path().to_path_buf()],
             &opts(),
+            &FileCache::new(),
         )
         .unwrap();
         assert_eq!(result.manifest.roots.len(), 2);
@@ -348,17 +395,20 @@ mod tests {
         build_tree(src.path());
         let roots = [src.path().to_path_buf()];
         let mut store = MemStore::new();
-        let first = create_snapshot(&mut store, &testkey(), &roots, &opts()).unwrap();
+        let first = create_snapshot(&mut store, &testkey(), &roots, &opts(), &FileCache::new()).unwrap();
         assert!(!first.new_blobs.is_empty());
 
         // No changes: second snapshot must write zero new data blobs.
-        let second = create_snapshot(&mut store, &testkey(), &roots, &opts()).unwrap();
+        let second = create_snapshot(&mut store, &testkey(), &roots, &opts(), &first.cache).unwrap();
         assert!(second.new_blobs.is_empty(), "unchanged tree re-uploaded {:?}", second.new_blobs);
         assert_eq!(second.bytes_new, 0);
+        assert_eq!(second.bytes_scanned, 0, "cache hits must not re-read files");
+        assert_eq!(second.files_cached, 2, "both regular files should be cache hits");
+        assert_eq!(second.manifest_hash, first.manifest_hash);
 
         // Touch one small file: only that file's chunk should be new.
         fs::write(src.path().join("hello.txt"), b"hello again").unwrap();
-        let third = create_snapshot(&mut store, &testkey(), &roots, &opts()).unwrap();
+        let third = create_snapshot(&mut store, &testkey(), &roots, &opts(), &second.cache).unwrap();
         assert_eq!(third.new_blobs.len(), 1);
     }
 

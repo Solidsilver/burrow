@@ -77,6 +77,25 @@ async fn dispatch(state: &Arc<AppState>, req: CtrlRequest) -> anyhow::Result<Ctr
             Ok(CtrlOk::Done(crate::peers::request_space(state, &name, bytes).await?))
         }
         CtrlRequest::Resync => Ok(CtrlOk::Done(crate::ops::resync(state).await?)),
+        CtrlRequest::Pause { seconds } => {
+            let until = match seconds {
+                Some(s) => std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0)
+                    + s,
+                None => u64::MAX,
+            };
+            *state.paused_until.lock().expect("pause lock poisoned") = Some(until);
+            Ok(CtrlOk::Done(match seconds {
+                Some(s) => format!("paused scheduled backups and replication for {s}s"),
+                None => "paused until `burrow resume`".to_string(),
+            }))
+        }
+        CtrlRequest::Resume => {
+            *state.paused_until.lock().expect("pause lock poisoned") = None;
+            Ok(CtrlOk::Done("resumed".to_string()))
+        }
         CtrlRequest::DeviceJoin { ticket } => {
             let (reply, _) = crate::peers::hello_via_ticket(state, &ticket).await?;
             if reply.identity.owner_pk != state.owner_pk {

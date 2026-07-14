@@ -261,6 +261,7 @@ pub mod rows {
             bytes_scanned: row.get("bytes_scanned")?,
             bytes_new: row.get("bytes_new")?,
             chunk_count: row.get("chunk_count")?,
+            files_cached: 0,
         })
     }
 }

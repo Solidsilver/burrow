@@ -146,14 +146,77 @@ pub async fn backup_run(state: &Arc<AppState>, backup_id: &str) -> anyhow::Resul
         }
     }
 
+    // Unchanged-file cache: skip re-reading files whose size+mtime match.
+    let old_cache: burrow_core::snapshot::FileCache = {
+        let id = cfg.id.clone();
+        state
+            .db
+            .call(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT path, size, mtime, chunks FROM file_cache WHERE backup_id = ?1",
+                )?;
+                let rows = stmt.query_map([&id], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, u64>(1)?,
+                        r.get::<_, i64>(2)?,
+                        r.get::<_, Vec<u8>>(3)?,
+                    ))
+                })?;
+                let mut cache = burrow_core::snapshot::FileCache::new();
+                for row in rows {
+                    let (path, size, mtime, chunks) = row?;
+                    if let Ok(chunks) = postcard::from_bytes(&chunks) {
+                        cache.insert(
+                            path,
+                            burrow_core::snapshot::FileCacheEntry { size, mtime, chunks },
+                        );
+                    }
+                }
+                Ok(cache)
+            })
+            .await?
+    };
+
     let store = state.blobs.clone();
     let repo_key = state.repo_key.clone();
     let result = tokio::task::spawn_blocking(move || {
         let mut adapter = IrohBlobStore::new(store);
-        create_snapshot(&mut adapter, &repo_key, &roots, &opts)
+        create_snapshot(&mut adapter, &repo_key, &roots, &opts, &old_cache)
     })
     .await
     .context("backup task panicked")??;
+
+    // Persist the fresh cache (replaces the old one wholesale, so deleted
+    // files don't linger).
+    {
+        let id = cfg.id.clone();
+        let rows: Vec<(String, u64, i64, Vec<u8>)> = result
+            .cache
+            .iter()
+            .filter_map(|(path, e)| {
+                postcard::to_allocvec(&e.chunks)
+                    .ok()
+                    .map(|c| (path.clone(), e.size, e.mtime, c))
+            })
+            .collect();
+        state
+            .db
+            .call(move |conn| {
+                let tx = conn.transaction()?;
+                tx.execute("DELETE FROM file_cache WHERE backup_id = ?1", [&id])?;
+                for (path, size, mtime, chunks) in rows {
+                    tx.execute(
+                        "INSERT INTO file_cache (backup_id, path, size, mtime, chunks)
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                        rusqlite::params![id, path, size, mtime, chunks],
+                    )?;
+                }
+                tx.commit()?;
+                Ok(())
+            })
+            .await?;
+    }
 
     // Pin the manifest so GC can never collect a snapshot's entry point.
     let tag_name = format!("snapshot/{}/{}", cfg.id, created_at);
@@ -178,6 +241,7 @@ pub async fn backup_run(state: &Arc<AppState>, backup_id: &str) -> anyhow::Resul
         bytes_scanned: result.bytes_scanned,
         bytes_new: result.bytes_new,
         chunk_count: result.manifest.referenced_blobs().len() as u64,
+        files_cached: result.files_cached,
     };
 
     // A deterministic pipeline means an unchanged tree snapshotted at the

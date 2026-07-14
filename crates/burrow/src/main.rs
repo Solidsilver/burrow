@@ -78,6 +78,11 @@ enum Command {
     Request { name: String, size: String },
     /// Verify replicas and re-replicate anything below target, right now
     Repair,
+    /// Suspend scheduled backups + replication (optionally for a duration,
+    /// e.g. `burrow pause 2h`)
+    Pause { duration: Option<String> },
+    /// Resume after `burrow pause`
+    Resume,
     /// Recreate keys on a bare machine from the 24-word recovery phrase
     Recover {
         /// The 24-word phrase (prompted interactively if omitted)
@@ -163,10 +168,11 @@ async fn main() -> anyhow::Result<()> {
             match call(CtrlRequest::BackupRun { backup_id }).await? {
                 CtrlOk::BackupDone(s) => {
                     println!(
-                        "snapshot {} of {:?}: {} files, {} scanned, {} new",
+                        "snapshot {} of {:?}: {} files ({} unchanged), {} read, {} new",
                         fmt_time(s.created_at),
                         s.backup_id,
                         s.file_count,
+                        s.files_cached,
                         fmt_bytes(s.bytes_scanned),
                         fmt_bytes(s.bytes_new),
                     );
@@ -249,7 +255,7 @@ async fn main() -> anyhow::Result<()> {
                     println!("no devices yet");
                     return Ok(());
                 };
-                println!("{:<16} {:<8} {:<8} {}", "DEVICE", "MODE", "ONLINE", "LAST SEEN");
+                println!("{:<16} {:<8} {:<8} LAST SEEN", "DEVICE", "MODE", "ONLINE");
                 for d in &me.devices {
                     println!(
                         "{:<16} {:<8} {:<8} {}",
@@ -279,6 +285,14 @@ async fn main() -> anyhow::Result<()> {
             done(call(CtrlRequest::RequestSpace { name, bytes }).await?)
         }
         Command::Repair => done(call(CtrlRequest::RepairNow).await?),
+        Command::Pause { duration } => {
+            let seconds = duration
+                .as_deref()
+                .map(burrow_daemon::config::parse_duration)
+                .transpose()?;
+            done(call(CtrlRequest::Pause { seconds }).await?)
+        }
+        Command::Resume => done(call(CtrlRequest::Resume).await?),
         Command::Resync => done(call(CtrlRequest::Resync).await?),
         Command::Recover { phrase } => recover(phrase),
         Command::Doctor => doctor().await,
@@ -369,28 +383,25 @@ async fn doctor() -> anyhow::Result<()> {
         Err(e) => failures += check(false, "daemon", format!("{e:#}")),
     }
 
-    match call(CtrlRequest::PeerList).await {
-        Ok(CtrlOk::Peers(peers)) => {
-            if peers.is_empty() {
-                println!("  (no peers configured yet)");
-            }
-            for p in peers.iter().filter(|p| p.state != "self") {
-                let any_online = p.devices.iter().any(|d| d.online == Some(true));
-                let probed = p.devices.iter().any(|d| d.online.is_some());
-                failures += check(
-                    any_online || !probed,
-                    &format!("peer {}", p.name),
-                    if any_online {
-                        "reachable".into()
-                    } else if probed {
-                        "UNREACHABLE (no device online)".into()
-                    } else {
-                        format!("not probed (state {})", p.state)
-                    },
-                );
-            }
+    if let Ok(CtrlOk::Peers(peers)) = call(CtrlRequest::PeerList).await {
+        if peers.is_empty() {
+            println!("  (no peers configured yet)");
         }
-        Ok(_) | Err(_) => {}
+        for p in peers.iter().filter(|p| p.state != "self") {
+            let any_online = p.devices.iter().any(|d| d.online == Some(true));
+            let probed = p.devices.iter().any(|d| d.online.is_some());
+            failures += check(
+                any_online || !probed,
+                &format!("peer {}", p.name),
+                if any_online {
+                    "reachable".into()
+                } else if probed {
+                    "UNREACHABLE (no device online)".into()
+                } else {
+                    format!("not probed (state {})", p.state)
+                },
+            );
+        }
     }
 
     if failures == 0 {

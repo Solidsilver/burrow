@@ -29,6 +29,30 @@ pub struct AppState {
     pub backup_lock: tokio::sync::Mutex<()>,
     /// Serializes replication passes.
     pub replicate_lock: tokio::sync::Mutex<()>,
+    /// Background work suspended until this unix time (u64::MAX = until
+    /// resumed). Manual commands ignore this.
+    pub paused_until: std::sync::Mutex<Option<u64>>,
+}
+
+impl AppState {
+    pub fn is_paused(&self) -> bool {
+        let mut guard = self.paused_until.lock().expect("pause lock poisoned");
+        match *guard {
+            None => false,
+            Some(until) => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                if now >= until {
+                    *guard = None;
+                    false
+                } else {
+                    true
+                }
+            }
+        }
+    }
 }
 
 /// Run the daemon until ctrl-c / SIGTERM.
@@ -110,6 +134,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         identity,
         backup_lock: tokio::sync::Mutex::new(()),
         replicate_lock: tokio::sync::Mutex::new(()),
+        paused_until: std::sync::Mutex::new(None),
     });
 
     // Register ourselves: the self owner row and this device.
