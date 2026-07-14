@@ -762,7 +762,15 @@ pub async fn restore(
     // Make sure every needed blob is local, pulling from replica holders for
     // anything missing (e.g. this machine lost its blob store).
     let manifest_hash = burrow_core::BlobHash(info.manifest_hash);
-    fetch_missing(state, &[manifest_hash]).await?;
+    fetch_missing(state, &[manifest_hash]).await.with_context(|| {
+        format!(
+            "snapshot {} is not restorable right now: its manifest is neither local nor \
+             held by a reachable peer (it may not have finished replicating before this \
+             machine lost data, or the holder is offline). `burrow snapshots {}` lists \
+             other snapshots to try.",
+            info.created_at, backup_id
+        )
+    })?;
     let manifest_bytes = state
         .blobs
         .blobs()

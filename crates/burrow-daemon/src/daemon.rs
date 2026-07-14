@@ -66,16 +66,26 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     // metadata says we need (own snapshots' chunks + blobs held for peers).
     // On a metadata read error we abort the GC run rather than delete blindly.
     let protect_db = db.clone();
+    // Interval override is a test knob (integration tests shrink it so
+    // quarantine-driven healing converges in seconds, not minutes).
+    let gc_secs = std::env::var("BURROW_GC_INTERVAL_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(300);
     let protect: iroh_blobs::store::GcConfig = iroh_blobs::store::GcConfig {
-        interval: std::time::Duration::from_secs(300),
+        interval: std::time::Duration::from_secs(gc_secs),
         add_protected: Some(std::sync::Arc::new(move |set| {
             let db = protect_db.clone();
             Box::pin(async move {
                 let hashes = db
                     .call(|conn| {
+                        // Quarantined blobs (failed local validation) are
+                        // deliberately unprotected: GC deleting them is what
+                        // allows a fresh copy to be fetched.
                         let mut stmt = conn.prepare(
                             "SELECT blob_hash FROM chunk_refs
-                             UNION SELECT blob_hash FROM held",
+                             UNION SELECT blob_hash FROM held
+                             EXCEPT SELECT blob_hash FROM quarantine",
                         )?;
                         let rows = stmt.query_map([], |r| r.get::<_, Vec<u8>>(0))?;
                         let mut out = Vec::new();

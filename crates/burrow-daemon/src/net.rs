@@ -121,7 +121,14 @@ impl ProtocolHandler for PeerProtocol {
 }
 
 /// Fetch one blob from a specific peer into the local store (verified,
-/// resumable, no-op if already present).
+/// resumable, no-op if already present AND its bytes still validate).
+///
+/// The store's completeness metadata can outlive the bytes (bit rot), and a
+/// blob the metadata calls complete is never re-transferred — the exact loop
+/// that made "repair" a no-op against a corrupt holder. So a skipped fetch
+/// requires a validated local read; corrupt blobs are quarantined (removed
+/// from GC protection) and the call fails until GC has reclaimed them, after
+/// which the next attempt transfers fresh bytes and lifts the quarantine.
 pub async fn fetch_blob(
     state: &Arc<AppState>,
     from: EndpointId,
@@ -130,7 +137,13 @@ pub async fn fetch_blob(
     let content = iroh_blobs::HashAndFormat::raw(hash);
     let local = state.blobs.remote().local(content).await?;
     if local.is_complete() {
-        return Ok(());
+        if local_blob_valid(&state.blobs, hash).await {
+            return Ok(());
+        }
+        quarantine(state, hash, true).await?;
+        anyhow::bail!(
+            "local copy of {hash} failed validation (bit rot); quarantined for GC — retry later"
+        );
     }
     let conn = state
         .endpoint
@@ -138,7 +151,46 @@ pub async fn fetch_blob(
         .await
         .context("connecting for blob fetch")?;
     state.blobs.remote().execute_get(conn, local.missing()).await.context("fetching blob")?;
+    // Fresh, verified bytes: clear any earlier quarantine for this hash.
+    quarantine(state, hash, false).await?;
     Ok(())
+}
+
+/// Run a validated bao export of the whole blob, discarding the data.
+/// Local reads are checked against the outboard, so any corruption of the
+/// stored bytes surfaces as an error. Only called on rare skip/heal paths,
+/// so buffering one blob is fine.
+async fn local_blob_valid(blobs: &iroh_blobs::api::Store, hash: iroh_blobs::Hash) -> bool {
+    blobs
+        .blobs()
+        .export_bao(hash, iroh_blobs::protocol::ChunkRanges::all())
+        .data_to_vec()
+        .await
+        .is_ok()
+}
+
+async fn quarantine(state: &Arc<AppState>, hash: iroh_blobs::Hash, add: bool) -> anyhow::Result<()> {
+    let h = hash.as_bytes().to_vec();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    state
+        .db
+        .call(move |conn| {
+            if add {
+                tracing::warn!(blob = %hash, "local blob failed validation — quarantining for GC");
+                conn.execute(
+                    "INSERT INTO quarantine (blob_hash, at) VALUES (?1, ?2)
+                     ON CONFLICT(blob_hash) DO NOTHING",
+                    rusqlite::params![h, now],
+                )?;
+            } else {
+                conn.execute("DELETE FROM quarantine WHERE blob_hash = ?1", [&h])?;
+            }
+            Ok(())
+        })
+        .await
 }
 
 /// Dial a peer and perform one request/reply exchange.

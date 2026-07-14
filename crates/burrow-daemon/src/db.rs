@@ -211,6 +211,20 @@ fn migrations() -> Migrations<'static> {
             );
             "#,
         ),
+        M::up(
+            // v7: blobs whose local bytes failed bao validation (bit rot).
+            // Quarantined hashes are EXCLUDED from GC protection so the store
+            // reclaims them; the next fetch then transfers fresh bytes and
+            // lifts the quarantine. (iroh-blobs has no direct delete API —
+            // GC is the only deletion path, so this is how a corrupt local
+            // copy gets replaced.)
+            r#"
+            CREATE TABLE quarantine (
+                blob_hash BLOB PRIMARY KEY,
+                at INTEGER NOT NULL
+            );
+            "#,
+        ),
     ])
 }
 
