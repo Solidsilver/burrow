@@ -32,7 +32,50 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     let db = Db::open(&crate::paths::db_file())?;
     let blobs_dir = crate::paths::blobs_dir();
     std::fs::create_dir_all(&blobs_dir)?;
-    let fs_store = FsStore::load(&blobs_dir)
+
+    // GC deletes anything unprotected: the callback protects every blob our
+    // metadata says we need (own snapshots' chunks + blobs held for peers).
+    // On a metadata read error we abort the GC run rather than delete blindly.
+    let protect_db = db.clone();
+    let protect: iroh_blobs::store::GcConfig = iroh_blobs::store::GcConfig {
+        interval: std::time::Duration::from_secs(300),
+        add_protected: Some(std::sync::Arc::new(move |set| {
+            let db = protect_db.clone();
+            Box::pin(async move {
+                let hashes = db
+                    .call(|conn| {
+                        let mut stmt = conn.prepare(
+                            "SELECT blob_hash FROM chunk_refs
+                             UNION SELECT blob_hash FROM held",
+                        )?;
+                        let rows = stmt.query_map([], |r| r.get::<_, Vec<u8>>(0))?;
+                        let mut out = Vec::new();
+                        for row in rows {
+                            out.push(row?);
+                        }
+                        Ok(out)
+                    })
+                    .await;
+                match hashes {
+                    Ok(hashes) => {
+                        for h in hashes {
+                            if let Ok(arr) = <[u8; 32]>::try_from(h) {
+                                set.insert(iroh_blobs::Hash::from_bytes(arr));
+                            }
+                        }
+                        iroh_blobs::store::ProtectOutcome::Continue
+                    }
+                    Err(e) => {
+                        tracing::error!("GC protect query failed; aborting GC run: {e:#}");
+                        iroh_blobs::store::ProtectOutcome::Abort
+                    }
+                }
+            })
+        })),
+    };
+    let mut store_opts = iroh_blobs::store::fs::options::Options::new(&blobs_dir);
+    store_opts.gc = Some(protect);
+    let fs_store = FsStore::load_with_opts(blobs_dir.join("blobs.db"), store_opts)
         .await
         .with_context(|| format!("opening blob store {}", blobs_dir.display()))?;
     let blobs: iroh_blobs::api::Store = (*fs_store).clone();
@@ -102,6 +145,8 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
 
     let ctrl = tokio::spawn(crate::ctrl::serve(state.clone(), listener));
     crate::replicate::spawn_replication_loop(Arc::downgrade(&state));
+    crate::verify::spawn_verify_loop(Arc::downgrade(&state));
+    crate::scheduler::spawn_scheduler(Arc::downgrade(&state));
 
     shutdown_signal().await;
     tracing::info!("shutting down");

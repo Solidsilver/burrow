@@ -43,6 +43,8 @@ pub enum CtrlRequest {
     Grant { name: String, bytes: u64 },
     /// Ask a peer to reserve space for us.
     RequestSpace { name: String, bytes: u64 },
+    /// Force a replication + verification pass now.
+    RepairNow,
 }
 
 pub type CtrlResult = Result<CtrlOk, CtrlError>;

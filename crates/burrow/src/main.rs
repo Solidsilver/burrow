@@ -71,6 +71,8 @@ enum Command {
     Grant { name: String, size: String },
     /// Ask a peer to reserve space for us, e.g. `burrow request anna 100gb`
     Request { name: String, size: String },
+    /// Verify replicas and re-replicate anything below target, right now
+    Repair,
 }
 
 #[derive(Subcommand)]
@@ -205,6 +207,7 @@ async fn main() -> anyhow::Result<()> {
             let bytes = burrow_daemon::config::parse_size(&size)?;
             done(call(CtrlRequest::RequestSpace { name, bytes }).await?)
         }
+        Command::Repair => done(call(CtrlRequest::RepairNow).await?),
     }
 }
 

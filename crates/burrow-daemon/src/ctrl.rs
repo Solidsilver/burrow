@@ -76,5 +76,12 @@ async fn dispatch(state: &Arc<AppState>, req: CtrlRequest) -> anyhow::Result<Ctr
         CtrlRequest::RequestSpace { name, bytes } => {
             Ok(CtrlOk::Done(crate::peers::request_space(state, &name, bytes).await?))
         }
+        CtrlRequest::RepairNow => {
+            let (ok, lost) = crate::verify::verify_round(state).await?;
+            let placed = crate::replicate::tick(state).await?;
+            Ok(CtrlOk::Done(format!(
+                "verified {ok} replicas ({lost} lost), placed {placed} new replicas"
+            )))
+        }
     }
 }

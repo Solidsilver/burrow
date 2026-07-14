@@ -13,3 +13,5 @@ pub mod keys;
 pub mod ops;
 pub mod paths;
 pub mod replicate;
+pub mod scheduler;
+pub mod verify;

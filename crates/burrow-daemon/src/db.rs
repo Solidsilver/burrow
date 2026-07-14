@@ -102,6 +102,11 @@ fn migrations() -> Migrations<'static> {
             CREATE INDEX idx_placements_peer ON placements(peer);
             "#,
         ),
+        M::up(
+            // When a grant shrinks below current usage, the holder gives the
+            // owner until this deadline to evacuate before forced eviction.
+            "ALTER TABLE grants ADD COLUMN shrink_deadline INTEGER;",
+        ),
     ])
 }
 

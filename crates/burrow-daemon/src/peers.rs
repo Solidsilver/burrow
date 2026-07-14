@@ -406,19 +406,33 @@ pub async fn grant(state: &Arc<AppState>, name: &str, bytes: u64) -> anyhow::Res
 
     let id = row.endpoint_id.as_bytes().to_vec();
     let now = now_unix();
-    state
+    let evac_window = state.config.repair.evac_window_secs();
+    let shrunk_below_usage = state
         .db
         .call(move |conn| {
+            let used: u64 = conn
+                .query_row(
+                    "SELECT COALESCE(SUM(size), 0) FROM held WHERE owner = ?1",
+                    [&id],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+            // Shrinking below usage starts the evacuation clock; growing back
+            // above it clears the deadline.
+            let deadline: Option<u64> =
+                if bytes < used { Some(now + evac_window) } else { None };
             conn.execute(
-                "INSERT INTO grants (peer, direction, granted_bytes, updated_at)
-                 VALUES (?1, 'given', ?2, ?3)
+                "INSERT INTO grants (peer, direction, granted_bytes, updated_at, shrink_deadline)
+                 VALUES (?1, 'given', ?2, ?3, ?4)
                  ON CONFLICT(peer, direction) DO UPDATE SET
-                   granted_bytes = excluded.granted_bytes, updated_at = excluded.updated_at",
-                rusqlite::params![id, bytes, now],
+                   granted_bytes = excluded.granted_bytes,
+                   updated_at = excluded.updated_at,
+                   shrink_deadline = excluded.shrink_deadline",
+                rusqlite::params![id, bytes, now, deadline],
             )?;
             // A grant answers any open space request.
             conn.execute("DELETE FROM space_requests WHERE peer = ?1", rusqlite::params![id])?;
-            Ok(())
+            Ok(bytes < used)
         })
         .await?;
 
@@ -430,11 +444,19 @@ pub async fn grant(state: &Arc<AppState>, name: &str, bytes: u64) -> anyhow::Res
     )
     .await
     .is_ok();
-    Ok(format!(
+    let mut msg = format!(
         "granted {} to {name:?}{}",
         crate::config::fmt_size(bytes),
         if notified { "" } else { " (they're offline; they'll learn of it when back)" }
-    ))
+    );
+    if shrunk_below_usage {
+        msg.push_str(&format!(
+            "\nnote: they currently use more than that — they have {} to move data \
+             elsewhere before eviction",
+            state.config.repair.evac_window
+        ));
+    }
+    Ok(msg)
 }
 
 pub async fn request_space(state: &Arc<AppState>, name: &str, bytes: u64) -> anyhow::Result<String> {
@@ -603,7 +625,7 @@ async fn handle_inner(
                 return Ok(PeerReply::Error("peering not approved yet".into()));
             }
             let now = now_unix();
-            state
+            let over_quota = state
                 .db
                 .call(move |conn| {
                     conn.execute(
@@ -613,10 +635,26 @@ async fn handle_inner(
                            granted_bytes = excluded.granted_bytes, updated_at = excluded.updated_at",
                         rusqlite::params![id, granted_bytes, now],
                     )?;
-                    Ok(())
+                    let placed: u64 = conn
+                        .query_row(
+                            "SELECT COALESCE(SUM(size), 0) FROM placements
+                             WHERE peer = ?1 AND state != 'lost'",
+                            [&id],
+                            |r| r.get(0),
+                        )
+                        .unwrap_or(0);
+                    Ok(placed > granted_bytes)
                 })
                 .await?;
             tracing::info!(peer = %remote.fmt_short(), granted_bytes, "grant changed");
+            if over_quota {
+                // Their grant shrank below what we've placed there: start
+                // evacuating before their deadline hits.
+                let state = state.clone();
+                tokio::spawn(async move {
+                    let _ = crate::replicate::tick(&state).await;
+                });
+            }
             Ok(PeerReply::GrantChangedAck)
         }
         PeerRequest::RequestStore { hash, size, is_manifest } => {

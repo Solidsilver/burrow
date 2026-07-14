@@ -210,6 +210,10 @@ pub async fn backup_run(state: &Arc<AppState>, backup_id: &str) -> anyhow::Resul
             .await?;
     }
 
+    if let Err(e) = prune(state, cfg).await {
+        tracing::warn!(backup = %cfg.id, "pruning failed: {e:#}");
+    }
+
     // Kick replication in the background; failures surface in `status`.
     {
         let state = state.clone();
@@ -227,6 +231,132 @@ pub async fn backup_run(state: &Arc<AppState>, backup_id: &str) -> anyhow::Resul
         "snapshot complete"
     );
     Ok(info)
+}
+
+/// Enforce `keep_last`: drop old snapshots, rebuild this backup's chunk_refs
+/// from the surviving manifests, unpin pruned manifest tags, and release
+/// now-orphaned blobs from peers. Local orphans then fall to GC.
+async fn prune(state: &Arc<AppState>, cfg: &crate::config::BackupConfig) -> anyhow::Result<()> {
+    let Some(keep) = cfg.keep_last else { return Ok(()) };
+    let backup_id = cfg.id.clone();
+
+    let (victims, survivors): (Vec<(u64, [u8; 32])>, Vec<[u8; 32]>) = {
+        let id = backup_id.clone();
+        state
+            .db
+            .call(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT created_at, manifest_hash FROM snapshots
+                     WHERE backup_id = ?1 ORDER BY created_at DESC",
+                )?;
+                let rows: Vec<(u64, Vec<u8>)> = stmt
+                    .query_map([&id], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect::<Result<_, _>>()?;
+                let mut victims = Vec::new();
+                let mut survivors = Vec::new();
+                for (i, (ts, hash)) in rows.into_iter().enumerate() {
+                    let Ok(h) = <[u8; 32]>::try_from(hash) else { continue };
+                    if i < keep as usize {
+                        survivors.push(h);
+                    } else {
+                        victims.push((ts, h));
+                    }
+                }
+                Ok((victims, survivors))
+            })
+            .await?
+    };
+    if victims.is_empty() {
+        return Ok(());
+    }
+
+    // Rebuild chunk_refs for this backup from the surviving manifests.
+    let mut fresh_refs: Vec<([u8; 32], u64, bool)> = Vec::new();
+    for mh in &survivors {
+        let bytes = state
+            .blobs
+            .blobs()
+            .get_bytes(iroh_blobs::Hash::from_bytes(*mh))
+            .await
+            .context("reading surviving manifest")?;
+        let manifest = burrow_core::manifest::Manifest::open(&state.repo_key, &bytes)?;
+        for e in &manifest.entries {
+            if let burrow_core::manifest::EntryKind::File { chunks, .. } = &e.kind {
+                for c in chunks {
+                    fresh_refs.push((
+                        c.blob_hash.0,
+                        c.size as u64 + burrow_core::crypto::BLOB_OVERHEAD as u64,
+                        false,
+                    ));
+                }
+            }
+        }
+        fresh_refs.push((*mh, bytes.len() as u64, true));
+    }
+
+    // Swap in the new refs and drop pruned snapshot rows.
+    let orphans: Vec<(Vec<u8>, Vec<u8>)> = {
+        let id = backup_id.clone();
+        let victims = victims.clone();
+        state
+            .db
+            .call(move |conn| {
+                let tx = conn.transaction()?;
+                for (ts, _) in &victims {
+                    tx.execute(
+                        "DELETE FROM snapshots WHERE backup_id = ?1 AND created_at = ?2",
+                        rusqlite::params![id, ts],
+                    )?;
+                }
+                tx.execute("DELETE FROM chunk_refs WHERE backup_id = ?1", [&id])?;
+                for (hash, size, is_manifest) in &fresh_refs {
+                    tx.execute(
+                        "INSERT INTO chunk_refs (backup_id, blob_hash, size, is_manifest)
+                         VALUES (?1, ?2, ?3, ?4)
+                         ON CONFLICT(backup_id, blob_hash) DO NOTHING",
+                        rusqlite::params![id, hash.as_slice(), size, is_manifest],
+                    )?;
+                }
+                // Placements for blobs no backup references anymore.
+                let mut stmt = tx.prepare(
+                    "SELECT peer, blob_hash FROM placements
+                     WHERE blob_hash NOT IN (SELECT blob_hash FROM chunk_refs)",
+                )?;
+                let orphans: Vec<(Vec<u8>, Vec<u8>)> = stmt
+                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect::<Result<_, _>>()?;
+                drop(stmt);
+                tx.commit()?;
+                Ok(orphans)
+            })
+            .await?
+    };
+
+    // Unpin pruned manifests so local GC can collect the old snapshot data.
+    for (ts, _) in &victims {
+        let tag = format!("snapshot/{}/{}", backup_id, ts);
+        if let Err(e) = state.blobs.tags().delete(tag).await {
+            tracing::debug!("tag delete failed (may not exist): {e}");
+        }
+    }
+
+    // Ask peers to drop orphaned replicas.
+    let mut per_peer: std::collections::HashMap<[u8; 32], Vec<[u8; 32]>> = Default::default();
+    for (peer, hash) in orphans {
+        if let (Ok(p), Ok(h)) =
+            (<[u8; 32]>::try_from(peer), <[u8; 32]>::try_from(hash))
+        {
+            per_peer.entry(p).or_default().push(h);
+        }
+    }
+    for (peer, hashes) in per_peer {
+        if let Err(e) = crate::replicate::release_from_peer(state, peer, &hashes).await {
+            tracing::warn!("releasing pruned blobs failed (will retry next tick): {e:#}");
+        }
+    }
+
+    tracing::info!(backup = %backup_id, pruned = victims.len(), kept = survivors.len(), "snapshots pruned");
+    Ok(())
 }
 
 /// Fetch any of `hashes` that aren't local from peers that hold replicas.

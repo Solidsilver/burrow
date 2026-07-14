@@ -14,8 +14,43 @@ pub struct Config {
     pub node: NodeConfig,
     #[serde(default)]
     pub storage: StorageConfig,
+    #[serde(default)]
+    pub repair: RepairConfig,
     #[serde(default, rename = "backup")]
     pub backups: Vec<BackupConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct RepairConfig {
+    /// Peer unseen this long stops counting as a replica holder.
+    pub grace_period: String,
+    /// How long an owner gets to evacuate after a grant shrinks below usage.
+    pub evac_window: String,
+    /// How often to spot-check that peers really hold our blobs.
+    pub verify_interval: String,
+}
+
+impl Default for RepairConfig {
+    fn default() -> Self {
+        Self {
+            grace_period: "72h".into(),
+            evac_window: "14d".into(),
+            verify_interval: "1h".into(),
+        }
+    }
+}
+
+impl RepairConfig {
+    pub fn grace_period_secs(&self) -> u64 {
+        parse_duration(&self.grace_period).expect("validated at load")
+    }
+    pub fn evac_window_secs(&self) -> u64 {
+        parse_duration(&self.evac_window).expect("validated at load")
+    }
+    pub fn verify_interval_secs(&self) -> u64 {
+        parse_duration(&self.verify_interval).expect("validated at load")
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -45,8 +80,11 @@ pub struct BackupConfig {
     /// Target number of remote replicas (local copy not counted).
     #[serde(default = "default_replicas")]
     pub replicas: u32,
-    /// Cron expression; None = manual runs only.
+    /// Cron expression (5-field crontab); None = manual runs only.
     pub schedule: Option<String>,
+    /// Keep only the newest N snapshots; older ones are pruned after each
+    /// run and their unique blobs released from peers. None = keep all.
+    pub keep_last: Option<u32>,
 }
 
 fn default_replicas() -> u32 {
@@ -78,6 +116,19 @@ impl Config {
         }
         if let Some(max) = &self.storage.offer_max {
             parse_size(max).with_context(|| format!("storage.offer_max {max:?}"))?;
+        }
+        for (label, value) in [
+            ("repair.grace_period", &self.repair.grace_period),
+            ("repair.evac_window", &self.repair.evac_window),
+            ("repair.verify_interval", &self.repair.verify_interval),
+        ] {
+            parse_duration(value).with_context(|| format!("{label} {value:?}"))?;
+        }
+        for b in &self.backups {
+            if let Some(s) = &b.schedule {
+                crate::scheduler::parse_cron(s)
+                    .with_context(|| format!("backup {:?} schedule {s:?}", b.id))?;
+            }
         }
         Ok(())
     }
@@ -116,6 +167,22 @@ pub fn parse_size(s: &str) -> anyhow::Result<u64> {
         bail!("bad size {s:?}");
     }
     Ok((value * mult as f64) as u64)
+}
+
+/// Parse durations like "30m", "72h", "14d", "90s".
+pub fn parse_duration(s: &str) -> anyhow::Result<u64> {
+    let s = s.trim().to_ascii_lowercase();
+    let split = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+    let (num, unit) = s.split_at(split);
+    let value: u64 = num.parse().with_context(|| format!("bad duration {s:?}"))?;
+    let mult = match unit {
+        "s" | "" => 1,
+        "m" => 60,
+        "h" => 3600,
+        "d" => 86400,
+        other => bail!("unknown duration unit {other:?} (use s/m/h/d)"),
+    };
+    Ok(value * mult)
 }
 
 /// Human-readable decimal size, e.g. 1_500_000_000 -> "1.5 GB".
