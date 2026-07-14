@@ -1133,7 +1133,20 @@ async fn handle_hello(
                         s
                     }
                     None => {
-                        // First contact: pending until a human approves the OWNER.
+                        // First contact: pending until a human approves the
+                        // OWNER. Cap how many strangers may queue up — valid
+                        // certificates are free to mint, so this is the only
+                        // brake on pending-list spam.
+                        let pending: i64 = conn.query_row(
+                            "SELECT COUNT(*) FROM owners WHERE state = 'pending_in'",
+                            [],
+                            |r| r.get(0),
+                        )?;
+                        if pending >= 32 {
+                            return Err(anyhow::anyhow!(
+                                "too many pending peering requests — try again later"
+                            ));
+                        }
                         let nick: String = owner_name
                             .chars()
                             .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')

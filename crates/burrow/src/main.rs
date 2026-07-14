@@ -650,8 +650,7 @@ fn init(name: Option<String>) -> anyhow::Result<()> {
 name = "{node_name}"
 
 # [storage]
-# offer_path = "/tank/burrow-held"   # where friends' chunks are stored (M3+)
-# offer_max = "500gb"
+# offer_max = "500gb"                # ceiling across all grants to friends
 
 # [[backup]]
 # id = "documents"

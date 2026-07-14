@@ -147,10 +147,13 @@ pub async fn peer_call(
     addr: impl Into<EndpointAddr>,
     req: &PeerRequest,
 ) -> anyhow::Result<PeerReply> {
-    // RequestStore replies only after the remote has pulled the blob, so it
-    // gets a transfer-sized budget; everything else is a quick round trip.
+    // RequestStore replies only after the remote has pulled the blob, so its
+    // budget scales with size (a large manifest on a slow uplink must still
+    // fit, or it would time out and retry forever); everything else is a
+    // quick round trip.
     let secs = match req {
-        PeerRequest::RequestStore { .. } => 180,
+        // 180s base + 1s per 256 KiB ≈ assumes a worst case of ~2 Mbit/s.
+        PeerRequest::RequestStore { size, .. } => 180 + size / (256 * 1024),
         _ => 15,
     };
     peer_call_with_timeout(endpoint, addr, req, Duration::from_secs(secs)).await

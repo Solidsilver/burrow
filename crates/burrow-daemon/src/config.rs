@@ -97,8 +97,6 @@ pub struct NodeConfig {
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct StorageConfig {
-    /// Where chunks held for friends are stored (M3+). Defaults to the data dir.
-    pub offer_path: Option<PathBuf>,
     /// Ceiling across all grants, e.g. "500gb". None = grant-by-grant only.
     pub offer_max: Option<String>,
 }
@@ -257,7 +255,6 @@ mod tests {
             name = "nas"
 
             [storage]
-            offer_path = "/tank/burrow-held"
             offer_max = "500gb"
 
             [[backup]]
