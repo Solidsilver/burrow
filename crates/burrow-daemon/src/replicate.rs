@@ -258,7 +258,7 @@ async fn rebalance(state: &Arc<AppState>) -> anyhow::Result<()> {
             if excess == 0 {
                 break;
             }
-            let already = to_release.get(&peer).map_or(false, |v| v.contains(&hash));
+            let already = to_release.get(&peer).is_some_and(|v| v.contains(&hash));
             if already {
                 excess = excess.saturating_sub(size);
                 continue;
@@ -270,7 +270,7 @@ async fn rebalance(state: &Arc<AppState>) -> anyhow::Result<()> {
                     hs.iter()
                         .filter(|(p, _, _)| {
                             *p != peer
-                                && !to_release.get(p).map_or(false, |v| v.contains(&hash))
+                                && !to_release.get(p).is_some_and(|v| v.contains(&hash))
                         })
                         .count() as u32
                 })
