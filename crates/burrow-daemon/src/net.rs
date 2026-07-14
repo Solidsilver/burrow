@@ -8,7 +8,7 @@ use anyhow::{bail, Context};
 use burrow_proto::peer::{PeerReply, PeerRequest, MAX_PEER_MSG};
 use burrow_proto::PEER_ALPN;
 use iroh::endpoint::presets;
-use iroh::protocol::{AcceptError, ProtocolHandler, Router};
+use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
 
 use crate::daemon::AppState;

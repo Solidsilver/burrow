@@ -34,15 +34,11 @@ pub fn spawn_auth_loop(
             match msg {
                 ProviderMessage::ClientConnected(m) => {
                     let allowed = match m.endpoint_id {
-                        Some(id) => {
-                            if is_active_peer(&state, id).await {
-                                conn_peer.insert(m.connection_id, id);
-                                true
-                            } else {
-                                false
-                            }
+                        Some(id) if is_active_peer(&state, id).await => {
+                            conn_peer.insert(m.connection_id, id);
+                            true
                         }
-                        None => false,
+                        _ => false,
                     };
                     tracing::debug!(
                         peer = ?m.endpoint_id.map(|id| id.fmt_short().to_string()),

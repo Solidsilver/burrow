@@ -64,14 +64,14 @@ pub fn create_snapshot<S: BlobStore>(
             .follow_links(false)
             .sort_by_file_name()
             .into_iter();
-        let mut iter = walker.filter_entry(|e| {
+        let iter = walker.filter_entry(|e| {
             e.depth() == 0
                 || e.path()
                     .strip_prefix(&root_abs)
                     .map(|rel| !excludes.is_match(rel))
                     .unwrap_or(true)
         });
-        while let Some(item) = iter.next() {
+        for item in iter {
             let item = item.map_err(|e| CoreError::Io(std::io::Error::other(e.to_string())))?;
             let rel_in_root = item
                 .path()

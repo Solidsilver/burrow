@@ -229,8 +229,8 @@ async fn peers_table() -> anyhow::Result<()> {
     let (given, received): (u64, u64) =
         peers.iter().fold((0, 0), |acc, p| (acc.0 + p.given_bytes, acc.1 + p.received_bytes));
     println!(
-        "{:<12} {:<10} {:<8} {:<22} {:<22} {}",
-        "PEER", "STATE", "ONLINE", "YOU GIVE (used)", "YOU GET (used)", "THEIR NAME"
+        "{:<12} {:<10} {:<8} {:<22} {:<22} THEIR NAME",
+        "PEER", "STATE", "ONLINE", "YOU GIVE (used)", "YOU GET (used)"
     );
     for p in &peers {
         let online = match p.online {
@@ -305,7 +305,7 @@ async fn status() -> anyhow::Result<()> {
                 return Ok(());
             }
             println!();
-            println!("{:<12} {:<9} {:<10} {:<20} {}", "BACKUP", "REPLICAS", "SNAPSHOTS", "LAST RUN", "PATHS");
+            println!("{:<12} {:<9} {:<10} {:<20} PATHS", "BACKUP", "REPLICAS", "SNAPSHOTS", "LAST RUN");
             for b in &s.backups {
                 let last = b
                     .last_snapshot
