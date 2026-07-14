@@ -7,6 +7,7 @@ pub mod chunk;
 pub mod crypto;
 pub mod error;
 pub mod manifest;
+pub mod planner;
 pub mod snapshot;
 pub mod store;
 

@@ -77,6 +77,31 @@ fn migrations() -> Migrations<'static> {
             );
             "#,
         ),
+        M::up(
+            r#"
+            -- Every blob my backups reference (data chunks + manifests),
+            -- with stored size; the replication planner's work list.
+            CREATE TABLE chunk_refs (
+                backup_id TEXT NOT NULL,
+                blob_hash BLOB NOT NULL,
+                size INTEGER NOT NULL,
+                is_manifest INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (backup_id, blob_hash)
+            );
+            CREATE INDEX idx_chunk_refs_hash ON chunk_refs(blob_hash);
+            -- Where my blobs live remotely.
+            CREATE TABLE placements (
+                blob_hash BLOB NOT NULL,
+                peer BLOB NOT NULL REFERENCES peers(endpoint_id) ON DELETE CASCADE,
+                size INTEGER NOT NULL,
+                state TEXT NOT NULL,   -- 'pending' | 'stored' | 'verified' | 'lost'
+                updated_at INTEGER NOT NULL,
+                last_verified INTEGER,
+                PRIMARY KEY (blob_hash, peer)
+            );
+            CREATE INDEX idx_placements_peer ON placements(peer);
+            "#,
+        ),
     ])
 }
 

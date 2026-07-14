@@ -619,6 +619,115 @@ async fn handle_inner(
             tracing::info!(peer = %remote.fmt_short(), granted_bytes, "grant changed");
             Ok(PeerReply::GrantChangedAck)
         }
+        PeerRequest::RequestStore { hash, size, is_manifest } => {
+            if !is_active {
+                return Ok(PeerReply::Error("peering not approved yet".into()));
+            }
+            // Quota: what we granted them vs what we already hold for them.
+            let (granted, used) = {
+                let id = id.clone();
+                state
+                    .db
+                    .call(move |conn| {
+                        let granted: u64 = conn
+                            .query_row(
+                                "SELECT granted_bytes FROM grants
+                                 WHERE peer = ?1 AND direction = 'given'",
+                                [&id],
+                                |r| r.get(0),
+                            )
+                            .unwrap_or(0);
+                        let used: u64 = conn
+                            .query_row(
+                                "SELECT COALESCE(SUM(size), 0) FROM held WHERE owner = ?1",
+                                [&id],
+                                |r| r.get(0),
+                            )
+                            .unwrap_or(0);
+                        Ok((granted, used))
+                    })
+                    .await?
+            };
+            let already_held = {
+                let id = id.clone();
+                let h = hash.to_vec();
+                state
+                    .db
+                    .call(move |conn| {
+                        Ok(conn.query_row(
+                            "SELECT COUNT(*) FROM held WHERE owner = ?1 AND blob_hash = ?2",
+                            rusqlite::params![id, h],
+                            |r| r.get::<_, i64>(0),
+                        )? > 0)
+                    })
+                    .await?
+            };
+            if !already_held && used + size > granted {
+                return Ok(PeerReply::Error(format!(
+                    "quota exceeded: {used} + {size} > {granted} granted"
+                )));
+            }
+
+            // Pull the blob from its owner (the requester) before confirming.
+            crate::net::fetch_blob(state, remote, iroh_blobs::Hash::from_bytes(hash))
+                .await
+                .map_err(|e| anyhow::anyhow!("fetching blob from you failed: {e:#}"))?;
+
+            let now = now_unix();
+            let h = hash.to_vec();
+            state
+                .db
+                .call(move |conn| {
+                    conn.execute(
+                        "INSERT INTO held (owner, blob_hash, size, is_manifest, stored_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5)
+                         ON CONFLICT(owner, blob_hash) DO UPDATE SET
+                           size = excluded.size, is_manifest = excluded.is_manifest",
+                        rusqlite::params![id, h, size, is_manifest, now],
+                    )?;
+                    conn.execute(
+                        "UPDATE grants SET used_bytes =
+                           (SELECT COALESCE(SUM(size), 0) FROM held WHERE owner = ?1),
+                           updated_at = ?2
+                         WHERE peer = ?1 AND direction = 'given'",
+                        rusqlite::params![id, now],
+                    )?;
+                    Ok(())
+                })
+                .await?;
+            tracing::debug!(peer = %remote.fmt_short(), size, "stored blob for peer");
+            Ok(PeerReply::StoreDone)
+        }
+        PeerRequest::Release { hashes } => {
+            if !is_active {
+                return Ok(PeerReply::Error("peering not approved yet".into()));
+            }
+            let now = now_unix();
+            let dropped = state
+                .db
+                .call(move |conn| {
+                    let tx = conn.transaction()?;
+                    let mut dropped = 0u32;
+                    for h in &hashes {
+                        dropped += tx.execute(
+                            "DELETE FROM held WHERE owner = ?1 AND blob_hash = ?2",
+                            rusqlite::params![id, h.as_slice()],
+                        )? as u32;
+                    }
+                    tx.execute(
+                        "UPDATE grants SET used_bytes =
+                           (SELECT COALESCE(SUM(size), 0) FROM held WHERE owner = ?1),
+                           updated_at = ?2
+                         WHERE peer = ?1 AND direction = 'given'",
+                        rusqlite::params![id, now],
+                    )?;
+                    tx.commit()?;
+                    Ok(dropped)
+                })
+                .await?;
+            // The blobs themselves are removed by GC once nothing protects them (M5).
+            Ok(PeerReply::ReleaseAck { dropped })
+        }
         PeerRequest::QuotaStatus => {
             let (granted, used) = state
                 .db

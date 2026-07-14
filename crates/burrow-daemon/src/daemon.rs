@@ -22,6 +22,8 @@ pub struct AppState {
     pub endpoint: iroh::Endpoint,
     /// Serializes backup runs.
     pub backup_lock: tokio::sync::Mutex<()>,
+    /// Serializes replication passes.
+    pub replicate_lock: tokio::sync::Mutex<()>,
 }
 
 /// Run the daemon until ctrl-c / SIGTERM.
@@ -47,6 +49,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         fs_store,
         endpoint: endpoint.clone(),
         backup_lock: tokio::sync::Mutex::new(()),
+        replicate_lock: tokio::sync::Mutex::new(()),
     });
 
     // Data plane: iroh-blobs gated by the per-peer auth loop.
@@ -98,13 +101,17 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     );
 
     let ctrl = tokio::spawn(crate::ctrl::serve(state.clone(), listener));
+    crate::replicate::spawn_replication_loop(Arc::downgrade(&state));
 
     shutdown_signal().await;
     tracing::info!("shutting down");
+    // Unlink the socket immediately: a replacement daemon may bind the same
+    // path while we finish the slow parts of shutdown, and removing it last
+    // would delete *their* socket.
+    let _ = std::fs::remove_file(&socket);
     ctrl.abort();
     let _ = tokio::time::timeout(std::time::Duration::from_secs(2), router.shutdown()).await;
     state.fs_store.shutdown().await.ok();
-    let _ = std::fs::remove_file(&socket);
     Ok(())
 }
 

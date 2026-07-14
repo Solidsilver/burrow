@@ -34,6 +34,8 @@ pub struct SnapshotResult {
     /// Blobs newly written by this snapshot (excludes pre-existing dedup hits
     /// and the manifest itself).
     pub new_blobs: Vec<BlobHash>,
+    /// Stored (sealed) size of the manifest blob.
+    pub manifest_size: u64,
     pub bytes_scanned: u64,
     pub bytes_new: u64,
 }
@@ -132,9 +134,10 @@ pub fn create_snapshot<S: BlobStore>(
         entries: entries.into_values().collect(),
     };
     let sealed = manifest.seal(key);
+    let manifest_size = sealed.blob.len() as u64;
     let manifest_hash = store.put(sealed.blob)?;
 
-    Ok(SnapshotResult { manifest, manifest_hash, new_blobs, bytes_scanned, bytes_new })
+    Ok(SnapshotResult { manifest, manifest_hash, new_blobs, manifest_size, bytes_scanned, bytes_new })
 }
 
 /// Restore a snapshot into `target` (created if missing). Existing files in

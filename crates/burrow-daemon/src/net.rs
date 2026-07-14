@@ -107,11 +107,47 @@ impl ProtocolHandler for PeerProtocol {
     }
 }
 
+/// Fetch one blob from a specific peer into the local store (verified,
+/// resumable, no-op if already present).
+pub async fn fetch_blob(
+    state: &Arc<AppState>,
+    from: EndpointId,
+    hash: iroh_blobs::Hash,
+) -> anyhow::Result<()> {
+    let content = iroh_blobs::HashAndFormat::raw(hash);
+    let local = state.blobs.remote().local(content).await?;
+    if local.is_complete() {
+        return Ok(());
+    }
+    let conn = state
+        .endpoint
+        .connect(from, iroh_blobs::protocol::ALPN)
+        .await
+        .context("connecting for blob fetch")?;
+    state.blobs.remote().execute_get(conn, local.missing()).await.context("fetching blob")?;
+    Ok(())
+}
+
 /// Dial a peer and perform one request/reply exchange.
 pub async fn peer_call(
     endpoint: &Endpoint,
     addr: impl Into<EndpointAddr>,
     req: &PeerRequest,
+) -> anyhow::Result<PeerReply> {
+    // RequestStore replies only after the remote has pulled the blob, so it
+    // gets a transfer-sized budget; everything else is a quick round trip.
+    let secs = match req {
+        PeerRequest::RequestStore { .. } => 180,
+        _ => 15,
+    };
+    peer_call_with_timeout(endpoint, addr, req, Duration::from_secs(secs)).await
+}
+
+pub async fn peer_call_with_timeout(
+    endpoint: &Endpoint,
+    addr: impl Into<EndpointAddr>,
+    req: &PeerRequest,
+    timeout: Duration,
 ) -> anyhow::Result<PeerReply> {
     let fut = async {
         let conn = endpoint.connect(addr, PEER_ALPN).await.context("connecting to peer")?;
@@ -122,7 +158,7 @@ pub async fn peer_call(
         conn.close(0u32.into(), b"done");
         Ok::<PeerReply, anyhow::Error>(postcard::from_bytes(&bytes)?)
     };
-    tokio::time::timeout(Duration::from_secs(15), fut)
+    tokio::time::timeout(timeout, fut)
         .await
-        .map_err(|_| anyhow::anyhow!("peer did not answer within 15s"))?
+        .map_err(|_| anyhow::anyhow!("peer did not answer within {}s", timeout.as_secs()))?
 }

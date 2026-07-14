@@ -54,7 +54,12 @@ pub fn spawn_auth_loop(
                 ProviderMessage::GetRequestReceived(m) => {
                     let res = match conn_peer.get(&m.connection_id) {
                         Some(peer) => {
-                            if owns_blob(&state, *peer, m.request.hash.as_bytes()).await {
+                            // A peer may fetch a blob if they own it (it's
+                            // theirs, stored here) or if we placed it on them
+                            // (they're pulling a replica we asked them to hold).
+                            if owns_blob(&state, *peer, m.request.hash.as_bytes()).await
+                                || is_placed_on(&state, *peer, m.request.hash.as_bytes()).await
+                            {
                                 Ok(())
                             } else {
                                 Err(AbortReason::Permission)
@@ -78,6 +83,23 @@ async fn is_active_peer(state: &Arc<AppState>, id: EndpointId) -> bool {
             Ok(conn.query_row(
                 "SELECT COUNT(*) FROM peers WHERE endpoint_id = ?1 AND state = 'active'",
                 [&bytes],
+                |r| r.get::<_, i64>(0),
+            )? > 0)
+        })
+        .await
+        .unwrap_or(false)
+}
+
+async fn is_placed_on(state: &Arc<AppState>, peer: EndpointId, hash: &[u8; 32]) -> bool {
+    let peer_bytes = peer.as_bytes().to_vec();
+    let hash_bytes = hash.to_vec();
+    state
+        .db
+        .call(move |conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM placements
+                 WHERE peer = ?1 AND blob_hash = ?2 AND state != 'lost'",
+                rusqlite::params![peer_bytes, hash_bytes],
                 |r| r.get::<_, i64>(0),
             )? > 0)
         })

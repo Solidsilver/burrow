@@ -19,6 +19,12 @@ pub enum PeerRequest {
     GrantChanged { granted_bytes: u64 },
     /// Ask what the remote currently grants us and how much we use.
     QuotaStatus,
+    /// Ask the remote to hold a blob for us. On accept, the remote pulls the
+    /// blob from us over iroh-blobs before replying, so a success reply means
+    /// the replica exists.
+    RequestStore { hash: [u8; 32], size: u64, is_manifest: bool },
+    /// Tell the remote it may drop blobs of ours it holds.
+    Release { hashes: Vec<[u8; 32]> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,6 +34,9 @@ pub enum PeerReply {
     RequestSpaceRecorded,
     GrantChangedAck,
     QuotaStatus(QuotaReply),
+    /// Blob fetched and stored (or already present).
+    StoreDone,
+    ReleaseAck { dropped: u32 },
     /// Request refused (unknown peer, not approved, malformed…).
     Error(String),
 }

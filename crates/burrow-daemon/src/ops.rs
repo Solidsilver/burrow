@@ -52,6 +52,7 @@ pub async fn status(state: &Arc<AppState>) -> anyhow::Result<StatusInfo> {
             replicas: b.replicas,
             snapshot_count: count,
             last_snapshot: last,
+            health: replication_health(state, &b.id, b.replicas).await?,
         });
     }
     Ok(StatusInfo {
@@ -61,6 +62,32 @@ pub async fn status(state: &Arc<AppState>) -> anyhow::Result<StatusInfo> {
         endpoint_id: *state.endpoint.id().as_bytes(),
         backups,
     })
+}
+
+async fn replication_health(
+    state: &Arc<AppState>,
+    backup_id: &str,
+    target: u32,
+) -> anyhow::Result<burrow_proto::ctrl::ReplicationHealth> {
+    let id = backup_id.to_string();
+    state
+        .db
+        .call(move |conn| {
+            let (total, satisfied, degraded, critical) = conn.query_row(
+                "SELECT COUNT(*),
+                        COALESCE(SUM(CASE WHEN cnt >= ?2 THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN cnt > 0 AND cnt < ?2 THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN cnt = 0 THEN 1 ELSE 0 END), 0)
+                 FROM (SELECT (SELECT COUNT(*) FROM placements p
+                               WHERE p.blob_hash = cr.blob_hash
+                                 AND p.state IN ('stored', 'verified')) AS cnt
+                       FROM chunk_refs cr WHERE cr.backup_id = ?1)",
+                rusqlite::params![id, target],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )?;
+            Ok(burrow_proto::ctrl::ReplicationHealth { total_blobs: total, satisfied, degraded, critical })
+        })
+        .await
 }
 
 pub async fn backup_run(state: &Arc<AppState>, backup_id: &str) -> anyhow::Result<SnapshotInfo> {
@@ -149,6 +176,50 @@ pub async fn backup_run(state: &Arc<AppState>, backup_id: &str) -> anyhow::Resul
         tracing::info!(backup = %cfg.id, "snapshot identical to an existing one; not re-recorded");
     }
 
+    // Register every blob this snapshot depends on as replication work.
+    {
+        let backup = cfg.id.clone();
+        let mut refs: Vec<([u8; 32], u64, bool)> = result
+            .manifest
+            .entries
+            .iter()
+            .filter_map(|e| match &e.kind {
+                EntryKind::File { chunks, .. } => Some(chunks.iter().map(|c| {
+                    (c.blob_hash.0, c.size as u64 + burrow_core::crypto::BLOB_OVERHEAD as u64, false)
+                })),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        refs.push((result.manifest_hash.0, result.manifest_size, true));
+        state
+            .db
+            .call(move |conn| {
+                let tx = conn.transaction()?;
+                for (hash, size, is_manifest) in refs {
+                    tx.execute(
+                        "INSERT INTO chunk_refs (backup_id, blob_hash, size, is_manifest)
+                         VALUES (?1, ?2, ?3, ?4)
+                         ON CONFLICT(backup_id, blob_hash) DO NOTHING",
+                        rusqlite::params![backup, hash.as_slice(), size, is_manifest],
+                    )?;
+                }
+                tx.commit()?;
+                Ok(())
+            })
+            .await?;
+    }
+
+    // Kick replication in the background; failures surface in `status`.
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            if let Err(e) = crate::replicate::tick(&state).await {
+                tracing::warn!("post-backup replication failed: {e:#}");
+            }
+        });
+    }
+
     tracing::info!(
         backup = %cfg.id,
         files = file_count,
@@ -156,6 +227,67 @@ pub async fn backup_run(state: &Arc<AppState>, backup_id: &str) -> anyhow::Resul
         "snapshot complete"
     );
     Ok(info)
+}
+
+/// Fetch any of `hashes` that aren't local from peers that hold replicas.
+async fn fetch_missing(
+    state: &Arc<AppState>,
+    hashes: &[burrow_core::BlobHash],
+) -> anyhow::Result<()> {
+    let mut missing = Vec::new();
+    for h in hashes {
+        if !state.blobs.blobs().has(to_iroh_hash(h)).await.unwrap_or(false) {
+            missing.push(*h);
+        }
+    }
+    if missing.is_empty() {
+        return Ok(());
+    }
+    tracing::info!(count = missing.len(), "fetching missing blobs from peers");
+
+    // Holders per missing blob, most-recently-verified first.
+    for h in &missing {
+        let hash_bytes = h.0.to_vec();
+        let holders: Vec<Vec<u8>> = state
+            .db
+            .call(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT peer FROM placements
+                     WHERE blob_hash = ?1 AND state IN ('stored', 'verified')
+                     ORDER BY COALESCE(last_verified, 0) DESC",
+                )?;
+                let rows = stmt.query_map([&hash_bytes], |r| r.get::<_, Vec<u8>>(0))?;
+                let mut out = Vec::new();
+                for row in rows {
+                    out.push(row?);
+                }
+                Ok(out)
+            })
+            .await?;
+        if holders.is_empty() {
+            anyhow::bail!("blob {h} is not local and no peer holds a replica");
+        }
+        let mut fetched = false;
+        let mut last_err = None;
+        for holder in holders {
+            let Ok(id_arr) = <[u8; 32]>::try_from(holder) else { continue };
+            let Ok(peer) = iroh::EndpointId::from_bytes(&id_arr) else { continue };
+            match crate::net::fetch_blob(state, peer, to_iroh_hash(h)).await {
+                Ok(()) => {
+                    fetched = true;
+                    break;
+                }
+                Err(e) => last_err = Some(e),
+            }
+        }
+        if !fetched {
+            anyhow::bail!(
+                "could not fetch blob {h} from any holder: {}",
+                last_err.map(|e| format!("{e:#}")).unwrap_or_default()
+            );
+        }
+    }
+    Ok(())
 }
 
 pub async fn snapshot_list(
@@ -222,9 +354,21 @@ pub async fn restore(
         })
         .await?;
 
+    // Make sure every needed blob is local, pulling from replica holders for
+    // anything missing (e.g. this machine lost its blob store).
+    let manifest_hash = burrow_core::BlobHash(info.manifest_hash);
+    fetch_missing(state, &[manifest_hash]).await?;
+    let manifest_bytes = state
+        .blobs
+        .blobs()
+        .get_bytes(to_iroh_hash(&manifest_hash))
+        .await
+        .context("reading manifest blob")?;
+    let parsed = burrow_core::manifest::Manifest::open(&state.repo_key, &manifest_bytes)?;
+    fetch_missing(state, &parsed.referenced_blobs()).await?;
+
     let store = state.blobs.clone();
     let repo_key = state.repo_key.clone();
-    let manifest_hash = burrow_core::BlobHash(info.manifest_hash);
     let target_clone = target.clone();
     let manifest = tokio::task::spawn_blocking(move || {
         let adapter = IrohBlobStore::new(store);

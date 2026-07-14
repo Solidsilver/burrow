@@ -305,7 +305,10 @@ async fn status() -> anyhow::Result<()> {
                 return Ok(());
             }
             println!();
-            println!("{:<12} {:<9} {:<10} {:<20} PATHS", "BACKUP", "REPLICAS", "SNAPSHOTS", "LAST RUN");
+            println!(
+                "{:<12} {:<9} {:<10} {:<20} {:<28} PATHS",
+                "BACKUP", "REPLICAS", "SNAPSHOTS", "LAST RUN", "REPLICATION"
+            );
             for b in &s.backups {
                 let last = b
                     .last_snapshot
@@ -315,11 +318,12 @@ async fn status() -> anyhow::Result<()> {
                 let paths: Vec<String> =
                     b.paths.iter().map(|p| p.display().to_string()).collect();
                 println!(
-                    "{:<12} {:<9} {:<10} {:<20} {}",
+                    "{:<12} {:<9} {:<10} {:<20} {:<28} {}",
                     b.backup_id,
                     b.replicas,
                     b.snapshot_count,
                     last,
+                    b.health.summary(),
                     paths.join(", ")
                 );
             }

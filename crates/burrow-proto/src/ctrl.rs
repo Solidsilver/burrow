@@ -121,6 +121,35 @@ pub struct BackupStatus {
     pub replicas: u32,
     pub snapshot_count: u64,
     pub last_snapshot: Option<SnapshotInfo>,
+    pub health: ReplicationHealth,
+}
+
+/// Replication standing across every blob a backup references.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ReplicationHealth {
+    pub total_blobs: u64,
+    /// Blobs at or above their replica target.
+    pub satisfied: u64,
+    /// Blobs below target but with at least one remote replica.
+    pub degraded: u64,
+    /// Blobs with zero remote replicas.
+    pub critical: u64,
+}
+
+impl ReplicationHealth {
+    pub fn summary(&self) -> String {
+        if self.total_blobs == 0 {
+            "no data yet".to_string()
+        } else if self.critical == self.total_blobs {
+            "local only".to_string()
+        } else if self.satisfied == self.total_blobs {
+            "healthy".to_string()
+        } else if self.critical > 0 {
+            format!("CRITICAL ({}/{} unreplicated)", self.critical, self.total_blobs)
+        } else {
+            format!("degraded ({}/{} below target)", self.degraded, self.total_blobs)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

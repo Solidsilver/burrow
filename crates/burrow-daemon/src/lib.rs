@@ -12,3 +12,4 @@ pub mod db;
 pub mod keys;
 pub mod ops;
 pub mod paths;
+pub mod replicate;
