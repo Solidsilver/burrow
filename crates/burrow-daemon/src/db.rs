@@ -275,6 +275,16 @@ mod tests {
         migrations().validate().unwrap();
     }
 
+    /// Every SQL statement must prepare against the *migrated* schema. This
+    /// catches queries left behind by a schema rename (a v5 column rename
+    /// silently broke pruning for months: `placements.peer` → `device`).
+    #[test]
+    fn queries_match_schema() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrations().to_latest(&mut conn).unwrap();
+        conn.prepare(crate::ops::ORPHAN_PLACEMENTS_SQL).unwrap();
+    }
+
     #[tokio::test]
     async fn open_and_query() {
         let dir = tempfile::tempdir().unwrap();

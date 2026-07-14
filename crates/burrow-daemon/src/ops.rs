@@ -497,6 +497,12 @@ pub async fn resync(state: &Arc<AppState>) -> anyhow::Result<String> {
     ))
 }
 
+/// Blobs placed remotely that no surviving snapshot references (checked
+/// against the freshly rebuilt chunk_refs). Extracted so the schema test in
+/// `db.rs` can prepare it against a migrated database.
+pub(crate) const ORPHAN_PLACEMENTS_SQL: &str = "SELECT device, blob_hash FROM placements
+     WHERE blob_hash NOT IN (SELECT blob_hash FROM chunk_refs)";
+
 /// Enforce `keep_last`: drop old snapshots, rebuild this backup's chunk_refs
 /// from the surviving manifests, unpin pruned manifest tags, and release
 /// now-orphaned blobs from peers. Local orphans then fall to GC.
@@ -511,7 +517,7 @@ async fn prune(state: &Arc<AppState>, cfg: &crate::config::BackupConfig) -> anyh
             .call(move |conn| {
                 let mut stmt = conn.prepare(
                     "SELECT created_at, manifest_hash FROM snapshots
-                     WHERE backup_id = ?1 ORDER BY created_at DESC",
+                     WHERE backup_id = ?1 ORDER BY created_at DESC, id DESC",
                 )?;
                 let rows: Vec<(u64, Vec<u8>)> = stmt
                     .query_map([&id], |r| Ok((r.get(0)?, r.get(1)?)))?
@@ -566,10 +572,10 @@ async fn prune(state: &Arc<AppState>, cfg: &crate::config::BackupConfig) -> anyh
             .db
             .call(move |conn| {
                 let tx = conn.transaction()?;
-                for (ts, _) in &victims {
+                for (_, hash) in &victims {
                     tx.execute(
-                        "DELETE FROM snapshots WHERE backup_id = ?1 AND created_at = ?2",
-                        rusqlite::params![id, ts],
+                        "DELETE FROM snapshots WHERE manifest_hash = ?1",
+                        rusqlite::params![hash.as_slice()],
                     )?;
                 }
                 tx.execute("DELETE FROM chunk_refs WHERE backup_id = ?1", [&id])?;
@@ -582,10 +588,7 @@ async fn prune(state: &Arc<AppState>, cfg: &crate::config::BackupConfig) -> anyh
                     )?;
                 }
                 // Placements for blobs no backup references anymore.
-                let mut stmt = tx.prepare(
-                    "SELECT peer, blob_hash FROM placements
-                     WHERE blob_hash NOT IN (SELECT blob_hash FROM chunk_refs)",
-                )?;
+                let mut stmt = tx.prepare(ORPHAN_PLACEMENTS_SQL)?;
                 let orphans: Vec<(Vec<u8>, Vec<u8>)> = stmt
                     .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
                     .collect::<Result<_, _>>()?;
