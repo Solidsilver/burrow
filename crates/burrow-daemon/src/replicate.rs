@@ -459,13 +459,33 @@ async fn rebalance(state: &Arc<AppState>) -> anyhow::Result<()> {
         })
         .await?;
 
+    // `referenced` = every blob some snapshot still needs, whether or not its
+    // backup id is present in the current config. Only blobs referenced by NO
+    // snapshot may be released everywhere; a backup id merely missing from
+    // config (commented out, renamed) must never cost its remote replicas.
     let mut blob_targets: HashMap<[u8; 32], (u32, u32)> = HashMap::new();
+    let mut referenced: HashSet<[u8; 32]> = HashSet::new();
+    let mut unconfigured: HashSet<String> = HashSet::new();
     for (h, ids) in target_rows {
         if let Ok(h) = <[u8; 32]>::try_from(h) {
-            if let Some(t) = blob_targets_for(state, &ids) {
-                blob_targets.insert(h, t);
+            referenced.insert(h);
+            match blob_targets_for(state, &ids) {
+                Some(t) => {
+                    blob_targets.insert(h, t);
+                }
+                None => {
+                    unconfigured.extend(ids.split(',').map(str::to_string));
+                }
             }
         }
+    }
+    if !unconfigured.is_empty() {
+        tracing::warn!(
+            backups = ?unconfigured,
+            "snapshots reference backups not in config — keeping their replicas; \
+             prune them by restoring the config entry with a keep_last, or remove \
+             their snapshots explicitly"
+        );
     }
 
     let mut per_blob: HashMap<[u8; 32], Vec<(DeviceId, OwnerId, u64, u64)>> = HashMap::new();
@@ -484,11 +504,14 @@ async fn rebalance(state: &Arc<AppState>) -> anyhow::Result<()> {
 
     for (hash, holders) in &per_blob {
         let Some(&(target, min_offsite)) = blob_targets.get(hash) else {
-            // Blob no longer referenced by any backup: release everywhere.
-            for (d, _, _, s) in holders {
-                to_release.entry(*d).or_default().push(*hash);
-                *usage.get_mut(d).unwrap() -= s;
+            if !referenced.contains(hash) {
+                // Blob no longer referenced by any snapshot: release everywhere.
+                for (d, _, _, s) in holders {
+                    to_release.entry(*d).or_default().push(*hash);
+                    *usage.get_mut(d).unwrap() -= s;
+                }
             }
+            // Referenced but its backup is missing from config: keep as-is.
             continue;
         };
         if holders.len() as u32 <= target {
@@ -552,7 +575,11 @@ async fn rebalance(state: &Arc<AppState>) -> anyhow::Result<()> {
                 excess = excess.saturating_sub(size);
                 continue;
             }
-            let (target, min_offsite) = blob_targets.get(&hash).copied().unwrap_or((0, 0));
+            // No targets means the backup is missing from config (true
+            // orphans were queued above): not safe to shed, skip.
+            let Some((target, min_offsite)) = blob_targets.get(&hash).copied() else {
+                continue;
+            };
             let remaining: Vec<&(DeviceId, OwnerId, u64, u64)> = per_blob
                 .get(&hash)
                 .map(|hs| {
