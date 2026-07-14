@@ -899,37 +899,76 @@ async fn handle_inner(
                     })
                     .await?
             };
+            // Fast refusal on the claimed size; authoritative check below.
             if !already_held && used + size > granted {
                 return Ok(PeerReply::Error(format!(
                     "quota exceeded: {used} + {size} > {granted} available"
                 )));
             }
-            crate::net::fetch_blob(state, remote, iroh_blobs::Hash::from_bytes(hash))
+            let iroh_hash = iroh_blobs::Hash::from_bytes(hash);
+            // Pin the incoming blob: it isn't in `held` yet, so a GC pass
+            // between fetch and the row commit would otherwise delete it
+            // while we report StoreDone.
+            let _gc_guard = state
+                .blobs
+                .tags()
+                .temp_tag(iroh_blobs::HashAndFormat::raw(iroh_hash))
+                .await
+                .map_err(|e| anyhow::anyhow!("pinning incoming blob: {e}"))?;
+            crate::net::fetch_blob(state, remote, iroh_hash)
                 .await
                 .map_err(|e| anyhow::anyhow!("fetching blob from you failed: {e:#}"))?;
+            // Quota accounting uses the size we actually stored, not the
+            // caller's claim.
+            let actual_size = match state.blobs.blobs().status(iroh_hash).await? {
+                iroh_blobs::api::proto::BlobStatus::Complete { size } => size,
+                other => anyhow::bail!("blob incomplete after fetch: {other:?}"),
+            };
             let now = now_unix();
             let h = hash.to_vec();
-            state
+            // Re-check the quota inside the same transaction as the insert:
+            // concurrent stores each see the other's committed usage, so a
+            // pair of in-flight requests can't both squeeze under the limit.
+            let accepted = state
                 .db
                 .call(move |conn| {
-                    conn.execute(
+                    let tx = conn.transaction()?;
+                    let already: bool = tx.query_row(
+                        "SELECT COUNT(*) FROM held WHERE owner_pk = ?1 AND blob_hash = ?2",
+                        rusqlite::params![pk, h],
+                        |r| r.get::<_, i64>(0),
+                    )? > 0;
+                    let used: u64 = tx.query_row(
+                        "SELECT COALESCE(SUM(size), 0) FROM held WHERE owner_pk = ?1",
+                        [&pk],
+                        |r| r.get(0),
+                    )?;
+                    if !already && used + actual_size > granted {
+                        return Ok(false);
+                    }
+                    tx.execute(
                         "INSERT INTO held (owner_pk, blob_hash, size, is_manifest, stored_at)
                          VALUES (?1, ?2, ?3, ?4, ?5)
                          ON CONFLICT(owner_pk, blob_hash) DO UPDATE SET
                            size = excluded.size, is_manifest = excluded.is_manifest",
-                        rusqlite::params![pk, h, size, is_manifest, now],
+                        rusqlite::params![pk, h, actual_size, is_manifest, now],
                     )?;
-                    conn.execute(
+                    tx.execute(
                         "UPDATE grants_given SET used_bytes =
                            (SELECT COALESCE(SUM(size), 0) FROM held WHERE owner_pk = ?1),
                            updated_at = ?2
                          WHERE owner_pk = ?1",
                         rusqlite::params![pk, now],
                     )?;
-                    Ok(())
+                    tx.commit()?;
+                    Ok(true)
                 })
                 .await?;
-            tracing::debug!(peer = %remote.fmt_short(), size, "stored blob");
+            if !accepted {
+                // Not recorded in `held`; the pin drops here and GC cleans up.
+                return Ok(PeerReply::Error("quota exceeded".into()));
+            }
+            tracing::debug!(peer = %remote.fmt_short(), size = actual_size, "stored blob");
             Ok(PeerReply::StoreDone)
         }
         PeerRequest::Release { hashes } => {
