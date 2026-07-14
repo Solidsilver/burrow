@@ -1,0 +1,12 @@
+[package]
+name = "burrow-daemon"
+description = "The burrow daemon: iroh router, storage contracts, replication, repair"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+burrow-core.workspace = true
+burrow-proto.workspace = true
+tracing.workspace = true

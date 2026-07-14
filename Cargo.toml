@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/burrow-core",
+    "crates/burrow-proto",
+    "crates/burrow-daemon",
+    "crates/burrow",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/solidsilver/burrow"
+
+[workspace.dependencies]
+burrow-core = { path = "crates/burrow-core" }
+burrow-proto = { path = "crates/burrow-proto" }
+burrow-daemon = { path = "crates/burrow-daemon" }
+
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", features = ["alloc"] }
+thiserror = "2"
+blake3 = "1"
+tracing = "0.1"
+
+[profile.release]
+lto = "thin"
+strip = true

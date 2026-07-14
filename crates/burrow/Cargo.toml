@@ -1,0 +1,17 @@
+[package]
+name = "burrow"
+description = "Distributed backup among friends — reserve space on each other's machines, over iroh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "burrow"
+path = "src/main.rs"
+
+[dependencies]
+burrow-core.workspace = true
+burrow-proto.workspace = true
+burrow-daemon.workspace = true
+clap = { version = "4", features = ["derive"] }
