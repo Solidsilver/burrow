@@ -142,7 +142,10 @@
                 StateDirectory = "burrow";
                 NoNewPrivileges = true;
                 ProtectSystem = "strict";
-                ReadWritePaths = [ cfg.dataDir ];
+                # /tmp must be writable through ProtectSystem=strict: the CLI
+                # control socket lives at /tmp/burrow-<uid>/<hash>.sock (that
+                # is also why PrivateTmp is off below).
+                ReadWritePaths = [ cfg.dataDir "/tmp" ];
                 # Backup sources are read via the daemon; grant read access:
                 # add paths with services.burrow-extra ReadOnlyPaths or run as
                 # a user that owns them.
