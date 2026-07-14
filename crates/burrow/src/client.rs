@@ -17,19 +17,9 @@ pub async fn call(req: CtrlRequest) -> anyhow::Result<CtrlOk> {
     result.map_err(|e| anyhow::anyhow!("{e}"))
 }
 
+/// Decimal units, matching what users type in `burrow grant` ("5gb" = 5.0 GB).
 pub fn fmt_bytes(n: u64) -> String {
-    const UNITS: [&str; 6] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
-    let mut value = n as f64;
-    let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{n} B")
-    } else {
-        format!("{value:.1} {}", UNITS[unit])
-    }
+    burrow_daemon::config::fmt_size(n)
 }
 
 pub fn fmt_time(unix: u64) -> String {

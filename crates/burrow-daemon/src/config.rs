@@ -118,6 +118,19 @@ pub fn parse_size(s: &str) -> anyhow::Result<u64> {
     Ok((value * mult as f64) as u64)
 }
 
+/// Human-readable decimal size, e.g. 1_500_000_000 -> "1.5 GB".
+pub fn fmt_size(n: u64) -> String {
+    const UNITS: [(&str, u64); 4] =
+        [("TB", 1_000_000_000_000), ("GB", 1_000_000_000), ("MB", 1_000_000), ("KB", 1_000)];
+    for (unit, mult) in UNITS {
+        if n >= mult {
+            let v = n as f64 / mult as f64;
+            return if v >= 100.0 { format!("{v:.0} {unit}") } else { format!("{v:.1} {unit}") };
+        }
+    }
+    format!("{n} B")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

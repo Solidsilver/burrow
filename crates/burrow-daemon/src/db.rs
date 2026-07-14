@@ -16,21 +16,68 @@ pub struct Db {
 }
 
 fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![M::up(
-        r#"
-        CREATE TABLE snapshots (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            backup_id TEXT NOT NULL,
-            created_at INTEGER NOT NULL,
-            manifest_hash BLOB NOT NULL UNIQUE,
-            file_count INTEGER NOT NULL,
-            bytes_scanned INTEGER NOT NULL,
-            bytes_new INTEGER NOT NULL,
-            chunk_count INTEGER NOT NULL
-        );
-        CREATE INDEX idx_snapshots_backup ON snapshots(backup_id, created_at);
-        "#,
-    )])
+    Migrations::new(vec![
+        M::up(
+            r#"
+            CREATE TABLE snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                backup_id TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                manifest_hash BLOB NOT NULL UNIQUE,
+                file_count INTEGER NOT NULL,
+                bytes_scanned INTEGER NOT NULL,
+                bytes_new INTEGER NOT NULL,
+                chunk_count INTEGER NOT NULL
+            );
+            CREATE INDEX idx_snapshots_backup ON snapshots(backup_id, created_at);
+            "#,
+        ),
+        M::up(
+            r#"
+            CREATE TABLE peers (
+                endpoint_id BLOB PRIMARY KEY,       -- 32 bytes
+                name TEXT NOT NULL UNIQUE,          -- local nickname
+                state TEXT NOT NULL,                -- 'pending_in' | 'active'
+                ticket TEXT,                        -- pairing ticket (dial hints)
+                hello_name TEXT,                    -- their self-reported name
+                approved_by_them INTEGER,           -- 0/1, from last contact
+                added_at INTEGER NOT NULL,
+                last_seen INTEGER
+            );
+            CREATE TABLE grants (
+                peer BLOB NOT NULL REFERENCES peers(endpoint_id) ON DELETE CASCADE,
+                direction TEXT NOT NULL,            -- 'given' | 'received'
+                granted_bytes INTEGER NOT NULL,
+                used_bytes INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (peer, direction)
+            );
+            CREATE TABLE held (                     -- chunks I store for peers
+                owner BLOB NOT NULL REFERENCES peers(endpoint_id) ON DELETE CASCADE,
+                blob_hash BLOB NOT NULL,
+                size INTEGER NOT NULL,
+                is_manifest INTEGER NOT NULL DEFAULT 0,
+                stored_at INTEGER NOT NULL,
+                PRIMARY KEY (owner, blob_hash)
+            );
+            CREATE INDEX idx_held_hash ON held(blob_hash);
+            CREATE TABLE space_requests (
+                peer BLOB PRIMARY KEY REFERENCES peers(endpoint_id) ON DELETE CASCADE,
+                bytes INTEGER NOT NULL,
+                given_total INTEGER NOT NULL DEFAULT 0,
+                received_total INTEGER NOT NULL DEFAULT 0,
+                requested_at INTEGER NOT NULL
+            );
+            CREATE TABLE transfer_ledger (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                peer BLOB NOT NULL,
+                direction TEXT NOT NULL,            -- 'sent' | 'received'
+                bytes INTEGER NOT NULL,
+                at INTEGER NOT NULL
+            );
+            "#,
+        ),
+    ])
 }
 
 impl Db {

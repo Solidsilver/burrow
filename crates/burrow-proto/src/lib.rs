@@ -2,6 +2,7 @@
 //! M3) the peer↔peer irpc service definitions.
 
 pub mod ctrl;
+pub mod peer;
 
 /// ALPN for burrow's peer control protocol (contracts, quotas, repair).
 pub const PEER_ALPN: &[u8] = b"burrow/peer/0";

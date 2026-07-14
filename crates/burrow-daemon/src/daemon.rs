@@ -18,6 +18,8 @@ pub struct AppState {
     pub blobs: iroh_blobs::api::Store,
     /// Held for the FsStore's lifetime.
     pub fs_store: FsStore,
+    /// This node's iroh endpoint (identity + connectivity).
+    pub endpoint: iroh::Endpoint,
     /// Serializes backup runs.
     pub backup_lock: tokio::sync::Mutex<()>,
 }
@@ -33,14 +35,33 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         .with_context(|| format!("opening blob store {}", blobs_dir.display()))?;
     let blobs: iroh_blobs::api::Store = (*fs_store).clone();
 
+    let node_key =
+        crate::net::load_or_create_node_key(&crate::paths::config_dir().join("node.key"))?;
+    let endpoint = crate::net::build_endpoint(node_key).await?;
+
     let state = Arc::new(AppState {
         config,
         repo_key,
         db,
         blobs,
         fs_store,
+        endpoint: endpoint.clone(),
         backup_lock: tokio::sync::Mutex::new(()),
     });
+
+    // Data plane: iroh-blobs gated by the per-peer auth loop.
+    let (events_tx, events_rx) = iroh_blobs::provider::events::EventSender::channel(
+        32,
+        crate::auth::event_mask(),
+    );
+    crate::auth::spawn_auth_loop(Arc::downgrade(&state), events_rx);
+    let blobs_proto = iroh_blobs::BlobsProtocol::new(&state.blobs, Some(events_tx));
+
+    let router = iroh::protocol::Router::builder(endpoint)
+        .accept(iroh_blobs::ALPN, blobs_proto)
+        .accept(burrow_proto::PEER_ALPN, crate::net::PeerProtocol::new(&state))
+        .spawn();
+    tracing::info!(endpoint_id = %state.endpoint.id(), "iroh endpoint up");
 
     let socket = crate::paths::socket_path();
     if let Some(parent) = socket.parent() {
@@ -81,6 +102,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     shutdown_signal().await;
     tracing::info!("shutting down");
     ctrl.abort();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), router.shutdown()).await;
     state.fs_store.shutdown().await.ok();
     let _ = std::fs::remove_file(&socket);
     Ok(())

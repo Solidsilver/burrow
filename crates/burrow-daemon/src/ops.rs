@@ -58,6 +58,7 @@ pub async fn status(state: &Arc<AppState>) -> anyhow::Result<StatusInfo> {
         node_name: state.config.node_name(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         data_dir: crate::paths::data_dir(),
+        endpoint_id: *state.endpoint.id().as_bytes(),
         backups,
     })
 }

@@ -54,6 +54,38 @@ enum Command {
         #[command(subcommand)]
         command: KeyCommand,
     },
+    /// Manage peerings with friends
+    Peer {
+        #[command(subcommand)]
+        command: PeerCommand,
+    },
+    /// List peers with grants and liveness
+    Peers,
+    /// Show pending peerings and space requests
+    Requests,
+    /// Approve a pending peer
+    Approve { name: String },
+    /// Deny a pending peer or clear their space request
+    Deny { name: String },
+    /// Reserve space for a peer, e.g. `burrow grant anna 200gb` (0 revokes)
+    Grant { name: String, size: String },
+    /// Ask a peer to reserve space for us, e.g. `burrow request anna 100gb`
+    Request { name: String, size: String },
+}
+
+#[derive(Subcommand)]
+enum PeerCommand {
+    /// Print this node's pairing ticket (send it to a friend)
+    Invite,
+    /// Add a friend from their pairing ticket
+    Add {
+        ticket: String,
+        /// Local nickname for this peer
+        #[arg(long)]
+        name: String,
+    },
+    /// Remove a peer entirely
+    Remove { name: String },
 }
 
 #[derive(Subcommand)]
@@ -147,7 +179,120 @@ async fn main() -> anyhow::Result<()> {
             print_recovery_phrase(&key);
             Ok(())
         }
+        Command::Peer { command } => match command {
+            PeerCommand::Invite => match call(CtrlRequest::PeerInvite).await? {
+                CtrlOk::Ticket(t) => {
+                    println!("send this ticket to your friend; they run:\n");
+                    println!("  burrow peer add {t} --name <your-nickname>\n");
+                    Ok(())
+                }
+                other => anyhow::bail!("unexpected reply: {other:?}"),
+            },
+            PeerCommand::Add { ticket, name } => {
+                done(call(CtrlRequest::PeerAdd { ticket, name }).await?)
+            }
+            PeerCommand::Remove { name } => done(call(CtrlRequest::PeerRemove { name }).await?),
+        },
+        Command::Peers => peers_table().await,
+        Command::Requests => requests_table().await,
+        Command::Approve { name } => done(call(CtrlRequest::Approve { name }).await?),
+        Command::Deny { name } => done(call(CtrlRequest::Deny { name }).await?),
+        Command::Grant { name, size } => {
+            let bytes = burrow_daemon::config::parse_size(&size)?;
+            done(call(CtrlRequest::Grant { name, bytes }).await?)
+        }
+        Command::Request { name, size } => {
+            let bytes = burrow_daemon::config::parse_size(&size)?;
+            done(call(CtrlRequest::RequestSpace { name, bytes }).await?)
+        }
     }
+}
+
+fn done(reply: CtrlOk) -> anyhow::Result<()> {
+    match reply {
+        CtrlOk::Done(msg) => {
+            println!("{msg}");
+            Ok(())
+        }
+        other => anyhow::bail!("unexpected reply: {other:?}"),
+    }
+}
+
+async fn peers_table() -> anyhow::Result<()> {
+    let CtrlOk::Peers(peers) = call(CtrlRequest::PeerList).await? else {
+        anyhow::bail!("unexpected reply");
+    };
+    if peers.is_empty() {
+        println!("no peers yet — run `burrow peer invite` and swap tickets with a friend");
+        return Ok(());
+    }
+    let (given, received): (u64, u64) =
+        peers.iter().fold((0, 0), |acc, p| (acc.0 + p.given_bytes, acc.1 + p.received_bytes));
+    println!(
+        "{:<12} {:<10} {:<8} {:<22} {:<22} {}",
+        "PEER", "STATE", "ONLINE", "YOU GIVE (used)", "YOU GET (used)", "THEIR NAME"
+    );
+    for p in &peers {
+        let online = match p.online {
+            Some(true) => "yes",
+            Some(false) => "no",
+            None => "-",
+        };
+        let state = if p.state == "active" && p.approved_by_them == Some(false) {
+            "await-them".to_string()
+        } else {
+            p.state.clone()
+        };
+        println!(
+            "{:<12} {:<10} {:<8} {:<22} {:<22} {}",
+            p.name,
+            state,
+            online,
+            format!("{} ({})", fmt_bytes(p.given_bytes), fmt_bytes(p.given_used)),
+            format!("{} ({})", fmt_bytes(p.received_bytes), fmt_bytes(p.received_used)),
+            p.hello_name.as_deref().unwrap_or("-"),
+        );
+    }
+    println!(
+        "\nratio: you give {} / you get {}",
+        fmt_bytes(given),
+        fmt_bytes(received)
+    );
+    Ok(())
+}
+
+async fn requests_table() -> anyhow::Result<()> {
+    let CtrlOk::Pending { peers, space_requests } = call(CtrlRequest::PendingList).await? else {
+        anyhow::bail!("unexpected reply");
+    };
+    if peers.is_empty() && space_requests.is_empty() {
+        println!("nothing pending");
+        return Ok(());
+    }
+    if !peers.is_empty() {
+        println!("pending peerings (approve with `burrow approve <name>`):");
+        for p in &peers {
+            println!(
+                "  {}  (calls itself {:?}, id {})",
+                p.name,
+                p.hello_name.as_deref().unwrap_or("?"),
+                p.endpoint_id.iter().take(4).map(|b| format!("{b:02x}")).collect::<String>(),
+            );
+        }
+    }
+    if !space_requests.is_empty() {
+        println!("\nspace requests (grant with `burrow grant <name> <size>`, refuse with `burrow deny <name>`):");
+        for r in &space_requests {
+            println!(
+                "  {} asks for {}  (their ratio: gives {} / gets {})",
+                r.peer_name,
+                fmt_bytes(r.bytes),
+                fmt_bytes(r.given_total),
+                fmt_bytes(r.received_total),
+            );
+        }
+    }
+    Ok(())
 }
 
 async fn status() -> anyhow::Result<()> {

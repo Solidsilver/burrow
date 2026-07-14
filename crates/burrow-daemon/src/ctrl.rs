@@ -54,5 +54,27 @@ async fn dispatch(state: &Arc<AppState>, req: CtrlRequest) -> anyhow::Result<Ctr
                 crate::ops::restore(state, &backup_id, snapshot, target).await?;
             Ok(CtrlOk::RestoreDone { files, bytes, target })
         }
+        CtrlRequest::PeerInvite => Ok(CtrlOk::Ticket(crate::peers::invite(state).await?)),
+        CtrlRequest::PeerAdd { ticket, name } => {
+            Ok(CtrlOk::Done(crate::peers::add(state, &ticket, &name).await?))
+        }
+        CtrlRequest::PeerList => Ok(CtrlOk::Peers(crate::peers::list(state).await?)),
+        CtrlRequest::PeerRemove { name } => {
+            Ok(CtrlOk::Done(crate::peers::remove(state, &name).await?))
+        }
+        CtrlRequest::PendingList => {
+            let (peers, space_requests) = crate::peers::pending(state).await?;
+            Ok(CtrlOk::Pending { peers, space_requests })
+        }
+        CtrlRequest::Approve { name } => {
+            Ok(CtrlOk::Done(crate::peers::approve(state, &name).await?))
+        }
+        CtrlRequest::Deny { name } => Ok(CtrlOk::Done(crate::peers::deny(state, &name).await?)),
+        CtrlRequest::Grant { name, bytes } => {
+            Ok(CtrlOk::Done(crate::peers::grant(state, &name, bytes).await?))
+        }
+        CtrlRequest::RequestSpace { name, bytes } => {
+            Ok(CtrlOk::Done(crate::peers::request_space(state, &name, bytes).await?))
+        }
     }
 }

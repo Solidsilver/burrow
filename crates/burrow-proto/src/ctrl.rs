@@ -25,6 +25,24 @@ pub enum CtrlRequest {
         snapshot: Option<u64>,
         target: PathBuf,
     },
+    /// Produce a pairing ticket for this node.
+    PeerInvite,
+    /// Add a friend from their pairing ticket under a local nickname.
+    PeerAdd { ticket: String, name: String },
+    /// List peers (live-refreshes grant/liveness info from reachable peers).
+    PeerList,
+    PeerRemove { name: String },
+    /// Pending inbound peerings and space requests.
+    PendingList,
+    /// Approve a pending inbound peer.
+    Approve { name: String },
+    /// Deny/remove a pending inbound peer or clear their space request.
+    Deny { name: String },
+    /// Reserve space for a peer (grow/shrink/revoke with bytes=0). Also the
+    /// way a space request is granted.
+    Grant { name: String, bytes: u64 },
+    /// Ask a peer to reserve space for us.
+    RequestSpace { name: String, bytes: u64 },
 }
 
 pub type CtrlResult = Result<CtrlOk, CtrlError>;
@@ -48,6 +66,43 @@ pub enum CtrlOk {
     BackupDone(SnapshotInfo),
     Snapshots(Vec<SnapshotInfo>),
     RestoreDone { files: u64, bytes: u64, target: PathBuf },
+    Ticket(String),
+    Peers(Vec<PeerInfo>),
+    Pending { peers: Vec<PeerInfo>, space_requests: Vec<SpaceRequestInfo> },
+    /// Generic success with a human-readable summary.
+    Done(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerInfo {
+    /// Local nickname.
+    pub name: String,
+    pub endpoint_id: [u8; 32],
+    /// "active" | "pending_in"
+    pub state: String,
+    /// Their self-reported node name.
+    pub hello_name: Option<String>,
+    pub last_seen: Option<u64>,
+    /// Bytes I reserve for them / of theirs I hold.
+    pub given_bytes: u64,
+    pub given_used: u64,
+    /// Bytes they reserve for me / of mine they hold.
+    pub received_bytes: u64,
+    pub received_used: u64,
+    /// Result of the live refresh during PeerList; None = not attempted.
+    pub online: Option<bool>,
+    /// Whether they've approved us (from last contact).
+    pub approved_by_them: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpaceRequestInfo {
+    pub peer_name: String,
+    pub bytes: u64,
+    /// Requester's self-reported give/take totals (advisory).
+    pub given_total: u64,
+    pub received_total: u64,
+    pub requested_at: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,6 +110,7 @@ pub struct StatusInfo {
     pub node_name: String,
     pub version: String,
     pub data_dir: PathBuf,
+    pub endpoint_id: [u8; 32],
     pub backups: Vec<BackupStatus>,
 }
 
