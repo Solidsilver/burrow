@@ -76,12 +76,13 @@ pub async fn verify_round(state: &Arc<AppState>) -> anyhow::Result<(u32, u32)> {
     for (peer_bytes, blobs) in work {
         let Ok(id_arr) = <[u8; 32]>::try_from(peer_bytes) else { continue };
         let Ok(peer) = EndpointId::from_bytes(&id_arr) else { continue };
-        let conn = match state.endpoint.connect(peer, iroh_blobs::protocol::ALPN).await {
+        let mut conn = match state.endpoint.connect(peer, iroh_blobs::protocol::ALPN).await {
             Ok(c) => c,
             Err(_) => continue, // unreachable: liveness handles this, not us
         };
         // Throwaway store so verification bypasses our local blob store.
         let scratch = MemStore::new();
+        let mut peer_reachable = true;
         for (hash_bytes, size) in blobs {
             let Ok(hash_arr) = <[u8; 32]>::try_from(hash_bytes) else { continue };
             let hash = iroh_blobs::Hash::from_bytes(hash_arr);
@@ -90,13 +91,26 @@ pub async fn verify_round(state: &Arc<AppState>) -> anyhow::Result<(u32, u32)> {
             let mut rand = [0u8; 8];
             getrandom::fill(&mut rand).expect("OS RNG unavailable");
             let idx = u64::from_le_bytes(rand) % chunk_count;
-            let request =
-                GetRequest::builder().root(ChunkRanges::chunk(idx)).build(hash);
-            let verified = scratch
-                .remote()
-                .execute_get(conn.clone(), request)
-                .await
-                .is_ok();
+            let request = || GetRequest::builder().root(ChunkRanges::chunk(idx)).build(hash);
+            let mut verified =
+                scratch.remote().execute_get(conn.clone(), request()).await.is_ok();
+            if !verified {
+                // A mid-stream hiccup is not proof of loss: retry once on a
+                // fresh connection before declaring the replica gone. If the
+                // peer became unreachable, this round proves nothing — bail
+                // without marking anything lost.
+                match state.endpoint.connect(peer, iroh_blobs::protocol::ALPN).await {
+                    Ok(fresh) => {
+                        conn = fresh;
+                        verified =
+                            scratch.remote().execute_get(conn.clone(), request()).await.is_ok();
+                    }
+                    Err(_) => {
+                        peer_reachable = false;
+                        break;
+                    }
+                }
+            }
             let now = now_unix();
             let (h, p) = (hash_arr, id_arr);
             if verified {
@@ -134,17 +148,19 @@ pub async fn verify_round(state: &Arc<AppState>) -> anyhow::Result<(u32, u32)> {
             }
         }
         // A completed round trip is also a liveness signal.
-        let now = now_unix();
-        state
-            .db
-            .call(move |conn| {
-                conn.execute(
-                    "UPDATE devices SET last_seen = ?2 WHERE endpoint_id = ?1",
-                    rusqlite::params![id_arr.as_slice(), now],
-                )?;
-                Ok(())
-            })
-            .await?;
+        if peer_reachable {
+            let now = now_unix();
+            state
+                .db
+                .call(move |conn| {
+                    conn.execute(
+                        "UPDATE devices SET last_seen = ?2 WHERE endpoint_id = ?1",
+                        rusqlite::params![id_arr.as_slice(), now],
+                    )?;
+                    Ok(())
+                })
+                .await?;
+        }
     }
     if lost > 0 {
         // Repair immediately rather than waiting for the next tick.

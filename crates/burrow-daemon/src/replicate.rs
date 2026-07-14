@@ -406,10 +406,11 @@ async fn rebalance(state: &Arc<AppState>) -> anyhow::Result<()> {
     let self_owner = state.owner_pk;
 
     #[allow(clippy::type_complexity)]
-    let (target_rows, holder_rows, grants): (
+    let (target_rows, holder_rows, grants, lost_rows): (
         Vec<(Vec<u8>, String)>,
         Vec<([u8; 32], DeviceId, OwnerId, u64, u64)>,
         HashMap<DeviceId, u64>,
+        Vec<([u8; 32], DeviceId)>,
     ) = state
         .db
         .call(move |conn| {
@@ -455,7 +456,20 @@ async fn rebalance(state: &Arc<AppState>) -> anyhow::Result<()> {
                     grants.insert(d, g);
                 }
             }
-            Ok((target_rows, holder_rows, grants))
+            // 'lost' placements: not counted as holders, but the holder may
+            // still carry the data (false-positive spot check) — release so
+            // its quota and our books reconcile.
+            let mut lost_rows = Vec::new();
+            let mut stmt =
+                conn.prepare("SELECT blob_hash, device FROM placements WHERE state = 'lost'")?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?)))?;
+            for row in rows {
+                let (h, d) = row?;
+                if let (Ok(h), Ok(d)) = (<[u8; 32]>::try_from(h), <[u8; 32]>::try_from(d)) {
+                    lost_rows.push((h, d));
+                }
+            }
+            Ok((target_rows, holder_rows, grants, lost_rows))
         })
         .await?;
 
@@ -598,6 +612,13 @@ async fn rebalance(state: &Arc<AppState>) -> anyhow::Result<()> {
                 excess = excess.saturating_sub(size);
             }
         }
+    }
+
+    // Lost placements: release clears the row (and, if the copy actually
+    // survived a false-positive spot check, the holder's quota). Unreachable
+    // devices keep their rows and are retried next pass.
+    for (hash, device) in lost_rows {
+        to_release.entry(device).or_default().push(hash);
     }
 
     for (device, hashes) in to_release {
