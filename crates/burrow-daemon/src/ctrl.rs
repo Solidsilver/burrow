@@ -124,8 +124,12 @@ async fn dispatch(state: &Arc<AppState>, req: CtrlRequest) -> anyhow::Result<Ctr
                 );
             }
             Ok(CtrlOk::Done(format!(
-                "linked with your device {:?} — it now recognizes this machine automatically",
-                reply.identity.device_name
+                "linked with your device {:?} — it now recognizes this machine automatically\n\
+                 note: device names must be unique among your machines. This device is\n\
+                 {:?}; a second machine joining under the same name would derive the SAME\n\
+                 identity and the two would be indistinguishable to your peers. If another\n\
+                 machine already uses this name, re-join with --device <unique-name>.",
+                reply.identity.device_name, state.device_name
             )))
         }
         CtrlRequest::RepairNow => {

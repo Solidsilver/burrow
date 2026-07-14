@@ -220,6 +220,21 @@ then is the replica counted. A planner converges placements toward each
 backup's replica target; verification, repair, evacuation, and pruning run as
 background loops.
 
+## Limitations
+
+- **Device names must be unique among your machines.** A device's identity is
+  derived from your phrase + its name, so two machines joined under the same
+  name (e.g. both defaulting to the hostname `macbook`) share one identity and
+  peers cannot tell them apart. Pass `--device <name>` when joining.
+- Non-UTF-8 filenames are stored lossily (restored under a sanitized name);
+  hardlinks are stored and restored as independent copies; sockets, FIFOs and
+  device nodes are skipped.
+- Exclude patterns: without `/` a pattern matches a path component at any
+  depth (`node_modules`, `*.tmp`); with `/` it anchors to the backup root and
+  `*` stops at separators (`.cache/**`).
+- A scheduled backup that has *never* run waits for its first cron slot; after
+  that, slots missed while the machine was off fire at the next daemon start.
+
 ## Building from source
 
 ```console
