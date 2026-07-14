@@ -179,6 +179,29 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
             .await?;
     }
 
+    // Restore a persisted pause (burrow pause survives daemon restarts).
+    {
+        let stored: Option<u64> = state
+            .db
+            .call(|conn| {
+                Ok(conn
+                    .query_row("SELECT value FROM kv WHERE key = 'paused_until'", [], |r| {
+                        r.get::<_, String>(0)
+                    })
+                    .ok()
+                    .and_then(|s| s.parse().ok()))
+            })
+            .await?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if let Some(until) = stored.filter(|&u| u > now) {
+            *state.paused_until.lock().expect("pause lock poisoned") = Some(until);
+            tracing::info!("scheduled work is paused (per previous `burrow pause`)");
+        }
+    }
+
     // Data plane: iroh-blobs gated by the per-peer auth loop.
     let (events_tx, events_rx) = iroh_blobs::provider::events::EventSender::channel(
         32,

@@ -87,6 +87,18 @@ async fn dispatch(state: &Arc<AppState>, req: CtrlRequest) -> anyhow::Result<Ctr
                 None => u64::MAX,
             };
             *state.paused_until.lock().expect("pause lock poisoned") = Some(until);
+            // Persist so a daemon restart doesn't silently resume.
+            state
+                .db
+                .call(move |conn| {
+                    conn.execute(
+                        "INSERT INTO kv (key, value) VALUES ('paused_until', ?1)
+                         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                        [until.to_string()],
+                    )?;
+                    Ok(())
+                })
+                .await?;
             Ok(CtrlOk::Done(match seconds {
                 Some(s) => format!("paused scheduled backups and replication for {s}s"),
                 None => "paused until `burrow resume`".to_string(),
@@ -94,6 +106,13 @@ async fn dispatch(state: &Arc<AppState>, req: CtrlRequest) -> anyhow::Result<Ctr
         }
         CtrlRequest::Resume => {
             *state.paused_until.lock().expect("pause lock poisoned") = None;
+            state
+                .db
+                .call(|conn| {
+                    conn.execute("DELETE FROM kv WHERE key = 'paused_until'", [])?;
+                    Ok(())
+                })
+                .await?;
             Ok(CtrlOk::Done("resumed".to_string()))
         }
         CtrlRequest::DeviceJoin { ticket } => {

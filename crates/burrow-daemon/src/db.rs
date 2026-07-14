@@ -107,6 +107,7 @@ fn migrations() -> Migrations<'static> {
             // owner until this deadline to evacuate before forced eviction.
             "ALTER TABLE grants ADD COLUMN shrink_deadline INTEGER;",
         ),
+        // (v6 appended below the v5 rebuild.)
         M::up(
             // v5: owner-identity model. Peer-keyed tables are dropped and
             // recreated keyed by owner (person) with devices underneath.
@@ -196,6 +197,17 @@ fn migrations() -> Migrations<'static> {
                 mtime INTEGER NOT NULL,
                 chunks BLOB NOT NULL,               -- postcard Vec<ChunkRef>
                 PRIMARY KEY (backup_id, path)
+            );
+            "#,
+        ),
+        M::up(
+            // v6: transfer_ledger was never read or written — drop it. Small
+            // daemon key/value state (e.g. paused_until) lives in kv.
+            r#"
+            DROP TABLE IF EXISTS transfer_ledger;
+            CREATE TABLE kv (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
             );
             "#,
         ),
