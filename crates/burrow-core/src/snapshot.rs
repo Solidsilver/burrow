@@ -25,6 +25,11 @@ pub struct SnapshotOptions {
     /// Glob patterns matched against each entry's root-relative path
     /// (e.g. `*.tmp`, `.cache/**`, `node_modules`).
     pub exclude: Vec<String>,
+    /// Files whose mtime (unix seconds) is at or after this cutoff are never
+    /// entered into the skip-cache: an mtime that fresh can't prove the file
+    /// won't change again within the filesystem's timestamp granularity.
+    /// Callers pass "now"; tests pass i64::MAX to cache everything.
+    pub cache_cutoff: i64,
 }
 
 /// Skip-unchanged-files cache: manifest path -> (size, mtime, chunk refs).
@@ -34,6 +39,8 @@ pub type FileCache = std::collections::HashMap<String, FileCacheEntry>;
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FileCacheEntry {
     pub size: u64,
+    /// Modification time in unix NANOseconds (whole seconds are too coarse:
+    /// a same-second rewrite with equal size would be silently skipped).
     pub mtime: i64,
     pub chunks: Vec<ChunkRef>,
 }
@@ -107,7 +114,7 @@ pub fn create_snapshot<S: BlobStore>(
             };
             let meta =
                 item.metadata().map_err(|e| CoreError::Io(std::io::Error::other(e.to_string())))?;
-            let (mode, mtime) = mode_and_mtime(&meta);
+            let (mode, mtime, mtime_nanos) = mode_and_mtime(&meta);
 
             let kind = if item.file_type().is_dir() {
                 EntryKind::Dir
@@ -119,12 +126,12 @@ pub fn create_snapshot<S: BlobStore>(
                 // reuse the refs without reading the file at all.
                 let cached = old_cache.get(&manifest_path).filter(|c| {
                     c.size == meta.len()
-                        && c.mtime == mtime
+                        && c.mtime == mtime_nanos
                         && c.chunks.iter().all(|r| store.contains(&r.blob_hash))
                 });
-                let chunks = if let Some(hit) = cached {
+                let (chunks, file_size) = if let Some(hit) = cached {
                     files_cached += 1;
-                    hit.chunks.clone()
+                    (hit.chunks.clone(), hit.size)
                 } else {
                     let mut chunks = Vec::new();
                     let reader = BufReader::new(fs::File::open(item.path())?);
@@ -144,13 +151,19 @@ pub fn create_snapshot<S: BlobStore>(
                             size: plaintext.len() as u32,
                         });
                     }
-                    chunks
+                    // The manifest size must describe the bytes we actually
+                    // chunked, not the earlier stat: a file appended to
+                    // between the two would otherwise fail its own restore.
+                    let read_size = chunks.iter().map(|c| c.size as u64).sum();
+                    (chunks, read_size)
                 };
-                new_cache.insert(
-                    manifest_path.clone(),
-                    FileCacheEntry { size: meta.len(), mtime, chunks: chunks.clone() },
-                );
-                EntryKind::File { size: meta.len(), chunks }
+                if mtime < opts.cache_cutoff {
+                    new_cache.insert(
+                        manifest_path.clone(),
+                        FileCacheEntry { size: file_size, mtime: mtime_nanos, chunks: chunks.clone() },
+                    );
+                }
+                EntryKind::File { size: file_size, chunks }
             } else {
                 continue; // sockets, fifos, devices: not backed up
             };
@@ -273,21 +286,25 @@ fn safe_join(target: &Path, rel: &str) -> Result<PathBuf> {
     Ok(target.join(rel_path))
 }
 
-fn mode_and_mtime(meta: &fs::Metadata) -> (u32, i64) {
+/// (mode bits, mtime in unix seconds, mtime in unix nanoseconds).
+/// Seconds go in the manifest; nanoseconds feed the skip-cache, where
+/// second granularity would miss same-second rewrites.
+fn mode_and_mtime(meta: &fs::Metadata) -> (u32, i64, i64) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        (meta.mode(), meta.mtime())
+        let nanos = meta.mtime().saturating_mul(1_000_000_000).saturating_add(meta.mtime_nsec());
+        (meta.mode(), meta.mtime(), nanos)
     }
     #[cfg(not(unix))]
     {
-        let mtime = meta
+        let nanos = meta
             .modified()
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs() as i64)
+            .map(|d| d.as_nanos() as i64)
             .unwrap_or(0);
-        (0o644, mtime)
+        (0o644, nanos / 1_000_000_000, nanos)
     }
 }
 
@@ -319,6 +336,7 @@ mod tests {
             node_name: "unit".into(),
             created_at: 1_700_000_000,
             exclude: vec![".cache/**".into(), ".cache".into(), "*.tmp".into()],
+            cache_cutoff: i64::MAX,
         }
     }
 
@@ -410,6 +428,46 @@ mod tests {
         fs::write(src.path().join("hello.txt"), b"hello again").unwrap();
         let third = create_snapshot(&mut store, &testkey(), &roots, &opts(), &second.cache).unwrap();
         assert_eq!(third.new_blobs.len(), 1);
+    }
+
+    #[test]
+    fn fresh_files_are_not_cached() {
+        // Files modified at/after cache_cutoff must be re-read next run: their
+        // mtime can't prove stability within fs timestamp granularity.
+        let src = tempfile::tempdir().unwrap();
+        fs::write(src.path().join("hot.txt"), b"just written").unwrap();
+        let roots = [src.path().to_path_buf()];
+        let mut store = MemStore::new();
+        let hot_opts = SnapshotOptions { cache_cutoff: 0, ..opts() };
+        let first =
+            create_snapshot(&mut store, &testkey(), &roots, &hot_opts, &FileCache::new()).unwrap();
+        assert!(first.cache.is_empty(), "hot file must not enter the cache");
+
+        let second = create_snapshot(&mut store, &testkey(), &roots, &hot_opts, &first.cache).unwrap();
+        assert_eq!(second.files_cached, 0);
+        assert!(second.bytes_scanned > 0, "hot file must be re-read");
+        // Content unchanged, so dedup still means no new blobs.
+        assert!(second.new_blobs.is_empty());
+    }
+
+    #[test]
+    fn same_second_rewrite_is_detected() {
+        // Rewrite with equal size and equal seconds-mtime but different
+        // nanoseconds must invalidate the cache entry.
+        let src = tempfile::tempdir().unwrap();
+        let file = src.path().join("data.txt");
+        fs::write(&file, b"version one!").unwrap();
+        filetime::set_file_mtime(&file, filetime::FileTime::from_unix_time(1_600_000_000, 111)).unwrap();
+        let roots = [src.path().to_path_buf()];
+        let mut store = MemStore::new();
+        let first =
+            create_snapshot(&mut store, &testkey(), &roots, &opts(), &FileCache::new()).unwrap();
+
+        fs::write(&file, b"version two!").unwrap(); // same length
+        filetime::set_file_mtime(&file, filetime::FileTime::from_unix_time(1_600_000_000, 222)).unwrap();
+        let second = create_snapshot(&mut store, &testkey(), &roots, &opts(), &first.cache).unwrap();
+        assert_eq!(second.files_cached, 0, "same-second rewrite must not hit the cache");
+        assert_eq!(second.new_blobs.len(), 1, "changed content must be stored");
     }
 
     #[test]

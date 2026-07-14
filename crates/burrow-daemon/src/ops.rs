@@ -138,6 +138,7 @@ pub async fn backup_run(state: &Arc<AppState>, backup_id: &str) -> anyhow::Resul
         node_name: state.config.node_name(),
         created_at,
         exclude: cfg.exclude.clone(),
+        cache_cutoff: created_at as i64,
     };
     let roots = cfg.paths.clone();
     for root in &roots {
