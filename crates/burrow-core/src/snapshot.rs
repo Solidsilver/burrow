@@ -248,7 +248,21 @@ pub fn restore_snapshot<S: BlobStore>(
                 }
             }
         }
-        apply_metadata(&dest, entry);
+        // Directory metadata waits for the second pass below: applying a
+        // read-only mode now would make writing the children fail, and the
+        // children's writes would clobber the directory mtime anyway.
+        if !matches!(entry.kind, EntryKind::Dir) {
+            apply_metadata(&dest, entry);
+        }
+    }
+    // Entries are path-sorted, so reverse order visits children before their
+    // parents (deepest first).
+    for entry in manifest.entries.iter().rev() {
+        if matches!(entry.kind, EntryKind::Dir) {
+            if let Ok(dest) = safe_join(target, &entry.path) {
+                apply_metadata(&dest, entry);
+            }
+        }
     }
     Ok(manifest)
 }
@@ -428,6 +442,47 @@ mod tests {
         fs::write(src.path().join("hello.txt"), b"hello again").unwrap();
         let third = create_snapshot(&mut store, &testkey(), &roots, &opts(), &second.cache).unwrap();
         assert_eq!(third.new_blobs.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restores_read_only_directories() {
+        use std::os::unix::fs::PermissionsExt;
+        let src = tempfile::tempdir().unwrap();
+        let ro_dir = src.path().join("frozen");
+        fs::create_dir(&ro_dir).unwrap();
+        fs::write(ro_dir.join("keep.txt"), b"contents").unwrap();
+        fs::set_permissions(&ro_dir, fs::Permissions::from_mode(0o555)).unwrap();
+
+        let mut store = MemStore::new();
+        let result = create_snapshot(
+            &mut store,
+            &testkey(),
+            &[src.path().to_path_buf()],
+            &opts(),
+            &FileCache::new(),
+        )
+        .unwrap();
+
+        let dst = tempfile::tempdir().unwrap();
+        let target = dst.path().join("out");
+        restore_snapshot(&store, &testkey(), &result.manifest_hash, &target).unwrap();
+
+        let restored_dir = target.join(prefixed(src.path(), "frozen"));
+        assert_eq!(
+            fs::read(restored_dir.join("keep.txt")).unwrap(),
+            b"contents",
+            "file inside read-only dir must be restored"
+        );
+        assert_eq!(
+            fs::metadata(&restored_dir).unwrap().permissions().mode() & 0o777,
+            0o555,
+            "directory mode must still be restored"
+        );
+
+        // Cleanup so tempdir can delete.
+        fs::set_permissions(&ro_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&restored_dir, fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     #[test]
