@@ -80,7 +80,21 @@
             dataDir = lib.mkOption {
               type = lib.types.path;
               default = "/var/lib/burrow";
-              description = "Blob store, metadata database, and held peer data.";
+              description = ''
+                Repo key, config, metadata database — and, unless blobsDir is
+                set, the blob store too.
+              '';
+            };
+
+            blobsDir = lib.mkOption {
+              type = lib.types.nullOr lib.types.path;
+              default = null;
+              example = "/media/burrow";
+              description = ''
+                Store bulk blob data (own chunks + data held for friends)
+                here instead of under dataDir — for keeping metadata on fast
+                storage while blobs live on a large pool.
+              '';
             };
 
             settings = lib.mkOption {
@@ -110,51 +124,75 @@
             };
           };
 
-          config = lib.mkIf cfg.enable {
-            users.users.${cfg.user} = lib.mkIf (cfg.user == "burrow") {
-              isSystemUser = true;
-              group = cfg.group;
-              home = cfg.dataDir;
-            };
-            users.groups.${cfg.group} = lib.mkIf (cfg.group == "burrow") { };
-
-            environment.systemPackages = [ cfg.package ];
-
-            systemd.services.burrow = {
-              description = "burrow — distributed backup among friends";
-              wantedBy = [ "multi-user.target" ];
-              after = [ "network-online.target" ];
-              wants = [ "network-online.target" ];
-              environment = {
+          config = lib.mkIf cfg.enable (
+            let
+              daemonEnv = {
                 BURROW_DATA_DIR = "${cfg.dataDir}/data";
                 BURROW_CONFIG_DIR = "${cfg.dataDir}/config";
+              } // lib.optionalAttrs (cfg.blobsDir != null) {
+                BURROW_BLOBS_DIR = cfg.blobsDir;
               };
-              preStart = ''
-                mkdir -p "${cfg.dataDir}/data" "${cfg.dataDir}/config"
-                ln -sf ${configFile} "${cfg.dataDir}/config/config.toml"
+              # Admin CLI against the system daemon: the control socket is
+              # 0600 under the service user, so this re-executes as that user
+              # with the daemon's environment.
+              burrowctl = pkgs.writeShellScriptBin "burrowctl" ''
+                exec /run/wrappers/bin/sudo -u ${cfg.user} \
+                  ${lib.getBin pkgs.coreutils}/bin/env \
+                  ${lib.concatStringsSep " "
+                    (lib.mapAttrsToList (k: v: "${k}=${v}") daemonEnv)} \
+                  ${lib.getExe cfg.package} "$@"
               '';
-              serviceConfig = {
-                ExecStart = "${lib.getExe cfg.package} daemon run";
-                User = cfg.user;
-                Group = cfg.group;
-                Restart = "on-failure";
-                RestartSec = 5;
-                StateDirectory = "burrow";
-                NoNewPrivileges = true;
-                ProtectSystem = "strict";
-                # /tmp must be writable through ProtectSystem=strict: the CLI
-                # control socket lives at /tmp/burrow-<uid>/<hash>.sock (that
-                # is also why PrivateTmp is off below).
-                ReadWritePaths = [ cfg.dataDir "/tmp" ];
-                # Backup sources are read via the daemon; grant read access:
-                # add paths with services.burrow-extra ReadOnlyPaths or run as
-                # a user that owns them.
-                ProtectHome = lib.mkDefault "read-only";
-                RestrictSUIDSGID = true;
-                PrivateTmp = false; # control socket lives under /tmp
+            in
+            {
+              users.users.${cfg.user} = lib.mkIf (cfg.user == "burrow") {
+                isSystemUser = true;
+                group = cfg.group;
+                home = cfg.dataDir;
               };
-            };
-          };
+              users.groups.${cfg.group} = lib.mkIf (cfg.group == "burrow") { };
+
+              environment.systemPackages = [ cfg.package burrowctl ];
+
+              # tmpfiles (not StateDirectory) so dataDir may live anywhere.
+              systemd.tmpfiles.rules = [
+                "d ${cfg.dataDir} 0750 ${cfg.user} ${cfg.group} -"
+                "d ${cfg.dataDir}/data 0750 ${cfg.user} ${cfg.group} -"
+                "d ${cfg.dataDir}/config 0750 ${cfg.user} ${cfg.group} -"
+              ] ++ lib.optional (cfg.blobsDir != null)
+                "d ${cfg.blobsDir} 0750 ${cfg.user} ${cfg.group} -";
+
+              systemd.services.burrow = {
+                description = "burrow — distributed backup among friends";
+                wantedBy = [ "multi-user.target" ];
+                after = [ "network-online.target" ];
+                wants = [ "network-online.target" ];
+                environment = daemonEnv;
+                preStart = ''
+                  ln -sf ${configFile} "${cfg.dataDir}/config/config.toml"
+                '';
+                serviceConfig = {
+                  ExecStart = "${lib.getExe cfg.package} daemon run";
+                  User = cfg.user;
+                  Group = cfg.group;
+                  Restart = "on-failure";
+                  RestartSec = 5;
+                  NoNewPrivileges = true;
+                  ProtectSystem = "strict";
+                  # /tmp must be writable through ProtectSystem=strict: the CLI
+                  # control socket lives at /tmp/burrow-<uid>/<hash>.sock (that
+                  # is also why PrivateTmp is off below).
+                  ReadWritePaths = [ cfg.dataDir "/tmp" ]
+                    ++ lib.optional (cfg.blobsDir != null) cfg.blobsDir;
+                  # Backup sources are read via the daemon; grant read access:
+                  # add paths with services.burrow-extra ReadOnlyPaths or run as
+                  # a user that owns them.
+                  ProtectHome = lib.mkDefault "read-only";
+                  RestrictSUIDSGID = true;
+                  PrivateTmp = false; # control socket lives under /tmp
+                };
+              };
+            }
+          );
         };
 
       nixosModules.default = self.nixosModules.burrow;

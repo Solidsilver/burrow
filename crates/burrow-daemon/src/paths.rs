@@ -71,7 +71,14 @@ pub fn socket_path() -> PathBuf {
     runtime.join(format!("burrow-{uid}")).join(format!("{tag}.sock"))
 }
 
+/// Bulk blob storage (own chunks + data held for friends, plus iroh's blob
+/// index). $BURROW_BLOBS_DIR relocates it independently of the metadata dir —
+/// typical for servers that keep metadata on fast storage and blobs on a
+/// large pool.
 pub fn blobs_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("BURROW_BLOBS_DIR") {
+        return PathBuf::from(dir);
+    }
     data_dir().join("blobs")
 }
 
