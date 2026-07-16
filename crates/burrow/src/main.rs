@@ -83,12 +83,11 @@ enum Command {
     Pause { duration: Option<String> },
     /// Resume after `burrow pause`
     Resume,
-    /// Recreate keys on a bare machine from the 24-word recovery phrase
-    Recover {
-        /// The 24-word phrase (prompted interactively if omitted)
-        #[arg(long)]
-        phrase: Option<String>,
-    },
+    /// Recreate keys on a bare machine from the 24-word recovery phrase.
+    /// The phrase is read from a hidden prompt, or from stdin if piped
+    /// (`printf %s "$PHRASE" | burrow recover`) — never passed as an argument,
+    /// which would leak it to `ps` and shell history.
+    Recover,
     /// Rebuild the snapshot catalog from what peers hold (after `recover`)
     Resync,
     /// Diagnose config, daemon, connectivity, and peer reachability
@@ -115,16 +114,14 @@ enum DeviceCommand {
     /// Print this device's ticket for linking another of YOUR devices
     Link,
     /// Link this (new) machine to your existing devices: enter your recovery
-    /// phrase and a ticket from any of them
+    /// phrase and a ticket from any of them. The phrase is read from a hidden
+    /// prompt, or from stdin if piped — never passed as an argument.
     Join {
         /// Ticket from `burrow device link` on an existing device
         ticket: String,
         /// Name for THIS device (defaults to hostname)
         #[arg(long)]
         device: Option<String>,
-        /// The 24-word phrase (prompted if omitted)
-        #[arg(long)]
-        phrase: Option<String>,
     },
     /// List your own devices
     List,
@@ -246,7 +243,7 @@ async fn main() -> anyhow::Result<()> {
                 }
                 other => anyhow::bail!("unexpected reply: {other:?}"),
             },
-            DeviceCommand::Join { ticket, device, phrase } => device_join(ticket, device, phrase).await,
+            DeviceCommand::Join { ticket, device } => device_join(ticket, device).await,
             DeviceCommand::List => {
                 let CtrlOk::Peers(owners) = call(CtrlRequest::PeerList).await? else {
                     anyhow::bail!("unexpected reply");
@@ -294,12 +291,50 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Resume => done(call(CtrlRequest::Resume).await?),
         Command::Resync => done(call(CtrlRequest::Resync).await?),
-        Command::Recover { phrase } => recover(phrase),
+        Command::Recover => recover(),
         Command::Doctor => doctor().await,
     }
 }
 
-fn recover(phrase: Option<String>) -> anyhow::Result<()> {
+/// Read a recovery phrase without exposing it. On a terminal we prompt with
+/// echo disabled; when stdin is piped (automation) we read the line as-is.
+/// The phrase is never taken from argv, which would leak it to `ps` and shell
+/// history.
+fn read_phrase(prompt: &str) -> anyhow::Result<String> {
+    use std::io::{BufRead, Write};
+
+    #[cfg(unix)]
+    {
+        let fd = libc::STDIN_FILENO;
+        if unsafe { libc::isatty(fd) } == 1 {
+            eprint!("{prompt}");
+            std::io::stderr().flush().ok();
+            let mut term: libc::termios = unsafe { std::mem::zeroed() };
+            if unsafe { libc::tcgetattr(fd, &mut term) } != 0 {
+                anyhow::bail!("cannot query terminal to hide input");
+            }
+            let restore = term;
+            term.c_lflag &= !libc::ECHO;
+            if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &term) } != 0 {
+                anyhow::bail!("cannot disable terminal echo");
+            }
+            let mut line = String::new();
+            let read = std::io::stdin().lock().read_line(&mut line);
+            // Always restore echo, even if the read failed.
+            unsafe { libc::tcsetattr(fd, libc::TCSANOW, &restore) };
+            eprintln!();
+            read?;
+            return Ok(line);
+        }
+    }
+
+    // Non-tty (piped) or non-unix: read a line directly.
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line)?;
+    Ok(line)
+}
+
+fn recover() -> anyhow::Result<()> {
     let key_path = burrow_daemon::paths::repo_key_file();
     if key_path.exists() {
         anyhow::bail!(
@@ -308,15 +343,7 @@ fn recover(phrase: Option<String>) -> anyhow::Result<()> {
             key_path.display()
         );
     }
-    let phrase = match phrase {
-        Some(p) => p,
-        None => {
-            eprintln!("enter your 24-word recovery phrase:");
-            let mut line = String::new();
-            std::io::stdin().read_line(&mut line)?;
-            line
-        }
-    };
+    let phrase = read_phrase("enter your 24-word recovery phrase: ")?;
     let key = burrow_core::RepoKey::from_recovery_phrase(phrase.trim())
         .context("that phrase doesn't decode to a valid repo key")?;
     std::fs::create_dir_all(burrow_daemon::paths::config_dir())?;
@@ -460,23 +487,11 @@ async fn peers_table() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn device_join(
-    ticket: String,
-    device: Option<String>,
-    phrase: Option<String>,
-) -> anyhow::Result<()> {
+async fn device_join(ticket: String, device: Option<String>) -> anyhow::Result<()> {
     let key_path = burrow_daemon::paths::repo_key_file();
     if !key_path.exists() {
         // Bare machine: recover the identity first.
-        let phrase = match phrase {
-            Some(p) => p,
-            None => {
-                eprintln!("enter your 24-word recovery phrase:");
-                let mut line = String::new();
-                std::io::stdin().read_line(&mut line)?;
-                line
-            }
-        };
+        let phrase = read_phrase("enter your 24-word recovery phrase: ")?;
         let key = burrow_core::RepoKey::from_recovery_phrase(phrase.trim())
             .context("that phrase doesn't decode to a valid repo key")?;
         burrow_daemon::keys::save_key(&key_path, &key)?;

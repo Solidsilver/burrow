@@ -26,6 +26,14 @@ fn now_unix() -> u64 {
         .as_secs()
 }
 
+/// Upper bound on devices we'll register for a single (non-self) owner. A
+/// valid device certificate is free to mint — the owner just signs any
+/// endpoint id it likes — so without a cap one peer could Hello from an
+/// endless stream of fresh device keys (even before approval) and grow the
+/// `devices` table without limit. Generous enough for any real person's
+/// machines; low enough that 32 pending strangers can't exhaust disk.
+const MAX_DEVICES_PER_OWNER: i64 = 32;
+
 /// Resolved caller identity for a peer request.
 pub struct Caller {
     pub owner_pk: [u8; 32],
@@ -900,7 +908,9 @@ async fn handle_inner(
                     .await?
             };
             // Fast refusal on the claimed size; authoritative check below.
-            if !already_held && used + size > granted {
+            // saturating_add so an absurd claimed `size` can't wrap past the
+            // limit instead of tripping it.
+            if !already_held && used.saturating_add(size) > granted {
                 return Ok(PeerReply::Error(format!(
                     "quota exceeded: {used} + {size} > {granted} available"
                 )));
@@ -915,7 +925,13 @@ async fn handle_inner(
                 .temp_tag(iroh_blobs::HashAndFormat::raw(iroh_hash))
                 .await
                 .map_err(|e| anyhow::anyhow!("pinning incoming blob: {e}"))?;
-            crate::net::fetch_blob(state, remote, iroh_hash)
+            // Cap the transfer at the space actually available: `size` is only
+            // the caller's claim, but the real blob is whatever `hash` resolves
+            // to on their side. fetch_blob probes the hash-verified size and
+            // refuses before downloading if it wouldn't fit, so a peer can't
+            // make us pull an arbitrarily large blob against a tiny grant.
+            let fetch_cap = if already_held { None } else { Some(granted.saturating_sub(used)) };
+            crate::net::fetch_blob(state, remote, iroh_hash, fetch_cap)
                 .await
                 .map_err(|e| anyhow::anyhow!("fetching blob from you failed: {e:#}"))?;
             // Quota accounting uses the size we actually stored, not the
@@ -943,7 +959,7 @@ async fn handle_inner(
                         [&pk],
                         |r| r.get(0),
                     )?;
-                    if !already && used + actual_size > granted {
+                    if !already && used.saturating_add(actual_size) > granted {
                         return Ok(false);
                     }
                     tx.execute(
@@ -1174,6 +1190,26 @@ async fn handle_hello(
                         "pending_in".to_string()
                     }
                 };
+                // Cap devices per owner. Existing devices refresh in place and
+                // never count against the limit; only a genuinely new endpoint
+                // id does, so a peer can't keep minting device rows forever.
+                let device_known: bool = conn.query_row(
+                    "SELECT COUNT(*) FROM devices WHERE endpoint_id = ?1",
+                    [&device_id],
+                    |r| r.get::<_, i64>(0),
+                )? > 0;
+                if !device_known {
+                    let device_count: i64 = conn.query_row(
+                        "SELECT COUNT(*) FROM devices WHERE owner_pk = ?1",
+                        [&pk],
+                        |r| r.get(0),
+                    )?;
+                    if device_count >= MAX_DEVICES_PER_OWNER {
+                        return Err(anyhow::anyhow!(
+                            "too many devices for this peer ({device_count}); refusing to register more"
+                        ));
+                    }
+                }
                 // Device rides on the owner's standing (cert already verified).
                 conn.execute(
                     "INSERT INTO devices (endpoint_id, owner_pk, device_name, mode, last_seen)

@@ -394,6 +394,7 @@ dependencies = [
  "burrow-proto",
  "chrono",
  "clap",
+ "libc",
  "tokio",
  "tracing-subscriber",
 ]

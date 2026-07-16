@@ -129,10 +129,18 @@ impl ProtocolHandler for PeerProtocol {
 /// requires a validated local read; corrupt blobs are quarantined (removed
 /// from GC protection) and the call fails until GC has reclaimed them, after
 /// which the next attempt transfers fresh bytes and lifts the quarantine.
+///
+/// `max_bytes` caps how large a blob we're willing to pull. The blob's true
+/// size is probed (a hash-verified last-chunk read the sender cannot lie
+/// about) and checked *before* the bulk transfer, so a peer that asks us to
+/// store an oversized blob is refused without ever downloading it. Pass `None`
+/// when pulling our own data back (restore/resync), where the hash already
+/// pins the content and no quota applies.
 pub async fn fetch_blob(
     state: &Arc<AppState>,
     from: EndpointId,
     hash: iroh_blobs::Hash,
+    max_bytes: Option<u64>,
 ) -> anyhow::Result<()> {
     let content = iroh_blobs::HashAndFormat::raw(hash);
     let local = state.blobs.remote().local(content).await?;
@@ -150,6 +158,14 @@ pub async fn fetch_blob(
         .connect(from, iroh_blobs::protocol::ALPN)
         .await
         .context("connecting for blob fetch")?;
+    if let Some(max) = max_bytes {
+        let (size, _) = iroh_blobs::get::request::get_verified_size(&conn, &hash)
+            .await
+            .map_err(|e| anyhow::anyhow!("probing blob size: {e}"))?;
+        if size > max {
+            anyhow::bail!("blob is {size} bytes, over the {max} bytes available — refusing to fetch");
+        }
+    }
     state.blobs.remote().execute_get(conn, local.missing()).await.context("fetching blob")?;
     // Fresh, verified bytes: clear any earlier quarantine for this hash.
     quarantine(state, hash, false).await?;

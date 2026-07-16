@@ -19,6 +19,12 @@ fn now_unix() -> u64 {
         .as_secs()
 }
 
+/// Ceiling on `ListHeld` pages consumed from a single peer during resync
+/// (1000 entries each). A cooperating peer reports `more == false` long
+/// before this; the cap stops a misbehaving one from looping us indefinitely
+/// or flooding the placements table by claiming endless pages.
+const MAX_RESYNC_PAGES_PER_PEER: u64 = 10_000;
+
 pub async fn status(state: &Arc<AppState>) -> anyhow::Result<StatusInfo> {
     let mut backups = Vec::new();
     for b in &state.config.backups {
@@ -377,6 +383,7 @@ pub async fn resync(state: &Arc<AppState>) -> anyhow::Result<String> {
         let Ok(owner_arr) = <[u8; 32]>::try_from(owner_bytes) else { continue };
         let Ok(peer) = iroh::EndpointId::from_bytes(&id_arr) else { continue };
         let mut offset = 0u64;
+        let mut pages = 0u64;
         loop {
             let reply = match crate::net::peer_call(
                 &state.endpoint,
@@ -427,6 +434,22 @@ pub async fn resync(state: &Arc<AppState>) -> anyhow::Result<String> {
                 })
                 .await?;
             if !more {
+                break;
+            }
+            // A peer that claims more pages but returns nothing can't advance
+            // the offset — stop rather than spin forever.
+            if count == 0 {
+                tracing::warn!(peer = %peer.fmt_short(), "resync: empty page with more=true — stopping");
+                break;
+            }
+            pages += 1;
+            if pages >= MAX_RESYNC_PAGES_PER_PEER {
+                tracing::warn!(
+                    peer = %peer.fmt_short(),
+                    pages,
+                    "resync: page cap reached for this peer — not reading further \
+                     (a well-behaved peer ends long before this)"
+                );
                 break;
             }
             offset += count;
@@ -677,7 +700,7 @@ async fn fetch_missing(
         for holder in holders {
             let Ok(id_arr) = <[u8; 32]>::try_from(holder) else { continue };
             let Ok(peer) = iroh::EndpointId::from_bytes(&id_arr) else { continue };
-            match crate::net::fetch_blob(state, peer, to_iroh_hash(h)).await {
+            match crate::net::fetch_blob(state, peer, to_iroh_hash(h), None).await {
                 Ok(()) => {
                     fetched = true;
                     break;
