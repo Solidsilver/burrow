@@ -740,7 +740,7 @@ fn init(name: Option<String>) -> anyhow::Result<()> {
 
     let config_path = burrow_daemon::paths::config_file();
     if !config_path.exists() {
-        let node_name = name.unwrap_or_else(|| gethostname_or_default());
+        let node_name = name.unwrap_or_else(gethostname_or_default);
         std::fs::write(
             &config_path,
             format!(
