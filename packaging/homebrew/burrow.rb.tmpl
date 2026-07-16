@@ -8,13 +8,10 @@ class Burrow < Formula
   license any_of: ["MIT", "Apache-2.0"]
 
   on_macos do
+    # Apple Silicon only; Intel macOS is not published (build from source).
     on_arm do
       url "https://github.com/solidsilver/burrow/releases/download/v#{version}/burrow-#{version}-aarch64-apple-darwin.tar.gz"
       sha256 "@@SHA256_DARWIN_ARM64@@"
-    end
-    on_intel do
-      url "https://github.com/solidsilver/burrow/releases/download/v#{version}/burrow-#{version}-x86_64-apple-darwin.tar.gz"
-      sha256 "@@SHA256_DARWIN_X86_64@@"
     end
   end
 

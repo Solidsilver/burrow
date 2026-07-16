@@ -23,8 +23,6 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
             linux: true
-          - target: x86_64-apple-darwin
-            os: macos-13
           - target: aarch64-apple-darwin
             os: macos-14
     runs-on: ${{ matrix.os }}
@@ -123,7 +121,6 @@ jobs:
           cp packaging/homebrew/burrow.rb.tmpl burrow.rb
           sed -i "s/@@VERSION@@/${version}/g"                       burrow.rb
           sed -i "s/@@SHA256_DARWIN_ARM64@@/$(sha aarch64-apple-darwin)/g"      burrow.rb
-          sed -i "s/@@SHA256_DARWIN_X86_64@@/$(sha x86_64-apple-darwin)/g"      burrow.rb
           sed -i "s/@@SHA256_LINUX_ARM64@@/$(sha aarch64-unknown-linux-gnu)/g" burrow.rb
           sed -i "s/@@SHA256_LINUX_X86_64@@/$(sha x86_64-unknown-linux-gnu)/g" burrow.rb
           echo "--- rendered Formula/burrow.rb ---"
