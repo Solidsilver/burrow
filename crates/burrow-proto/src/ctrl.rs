@@ -16,9 +16,13 @@ pub enum CtrlRequest {
     Ping,
     Status,
     /// Run a configured backup now.
-    BackupRun { backup_id: String },
+    BackupRun {
+        backup_id: String,
+    },
     /// List snapshots, optionally filtered by backup id.
-    SnapshotList { backup_id: Option<String> },
+    SnapshotList {
+        backup_id: Option<String>,
+    },
     Restore {
         backup_id: String,
         /// Restore this snapshot (unix seconds); latest if unset.
@@ -28,30 +32,49 @@ pub enum CtrlRequest {
     /// Produce a pairing ticket for this node.
     PeerInvite,
     /// Add a friend from their pairing ticket under a local nickname.
-    PeerAdd { ticket: String, name: String },
+    PeerAdd {
+        ticket: String,
+        name: String,
+    },
     /// List peers (live-refreshes grant/liveness info from reachable peers).
     PeerList,
-    PeerRemove { name: String },
+    PeerRemove {
+        name: String,
+    },
     /// Pending inbound peerings and space requests.
     PendingList,
     /// Approve a pending inbound peer.
-    Approve { name: String },
+    Approve {
+        name: String,
+    },
     /// Deny/remove a pending inbound peer or clear their space request.
-    Deny { name: String },
+    Deny {
+        name: String,
+    },
     /// Reserve space for a peer (grow/shrink/revoke with bytes=0). Also the
     /// way a space request is granted.
-    Grant { name: String, bytes: u64 },
+    Grant {
+        name: String,
+        bytes: u64,
+    },
     /// Ask a peer to reserve space for us.
-    RequestSpace { name: String, bytes: u64 },
+    RequestSpace {
+        name: String,
+        bytes: u64,
+    },
     /// Force a replication + verification pass now.
     RepairNow,
     /// Rebuild the snapshot catalog from what peers hold (disaster recovery).
     Resync,
     /// Link this device to another of the same owner via its ticket.
-    DeviceJoin { ticket: String },
+    DeviceJoin {
+        ticket: String,
+    },
     /// Suspend scheduled backups + replication (until resumed, or for a
     /// duration in seconds).
-    Pause { seconds: Option<u64> },
+    Pause {
+        seconds: Option<u64>,
+    },
     Resume,
 }
 
@@ -75,10 +98,17 @@ pub enum CtrlOk {
     Status(StatusInfo),
     BackupDone(SnapshotInfo),
     Snapshots(Vec<SnapshotInfo>),
-    RestoreDone { files: u64, bytes: u64, target: PathBuf },
+    RestoreDone {
+        files: u64,
+        bytes: u64,
+        target: PathBuf,
+    },
     Ticket(String),
     Peers(Vec<PeerInfo>),
-    Pending { peers: Vec<PeerInfo>, space_requests: Vec<SpaceRequestInfo> },
+    Pending {
+        peers: Vec<PeerInfo>,
+        space_requests: Vec<SpaceRequestInfo>,
+    },
     /// Generic success with a human-readable summary.
     Done(String),
 }
@@ -177,9 +207,15 @@ impl ReplicationHealth {
         } else if self.satisfied == self.total_blobs {
             "healthy".to_string()
         } else if self.critical > 0 {
-            format!("CRITICAL ({}/{} unreplicated)", self.critical, self.total_blobs)
+            format!(
+                "CRITICAL ({}/{} unreplicated)",
+                self.critical, self.total_blobs
+            )
         } else {
-            format!("degraded ({}/{} below target)", self.degraded, self.total_blobs)
+            format!(
+                "degraded ({}/{} below target)",
+                self.degraded, self.total_blobs
+            )
         }
     }
 }

@@ -213,16 +213,17 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     }
 
     // Data plane: iroh-blobs gated by the per-peer auth loop.
-    let (events_tx, events_rx) = iroh_blobs::provider::events::EventSender::channel(
-        32,
-        crate::auth::event_mask(),
-    );
+    let (events_tx, events_rx) =
+        iroh_blobs::provider::events::EventSender::channel(32, crate::auth::event_mask());
     crate::auth::spawn_auth_loop(Arc::downgrade(&state), events_rx);
     let blobs_proto = iroh_blobs::BlobsProtocol::new(&state.blobs, Some(events_tx));
 
     let router = iroh::protocol::Router::builder(endpoint)
         .accept(iroh_blobs::ALPN, blobs_proto)
-        .accept(burrow_proto::PEER_ALPN, crate::net::PeerProtocol::new(&state))
+        .accept(
+            burrow_proto::PEER_ALPN,
+            crate::net::PeerProtocol::new(&state),
+        )
         .spawn();
     tracing::info!(endpoint_id = %state.endpoint.id(), "iroh endpoint up");
 
@@ -304,9 +305,8 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
 async fn shutdown_signal() {
     #[cfg(unix)]
     {
-        let mut term =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("installing SIGTERM handler");
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("installing SIGTERM handler");
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {}
             _ = term.recv() => {}

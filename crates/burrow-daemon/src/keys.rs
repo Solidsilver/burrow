@@ -7,7 +7,10 @@ use burrow_core::RepoKey;
 
 pub fn generate_and_save(path: &Path) -> anyhow::Result<RepoKey> {
     if path.exists() {
-        bail!("repo key already exists at {} — refusing to overwrite it", path.display());
+        bail!(
+            "repo key already exists at {} — refusing to overwrite it",
+            path.display()
+        );
     }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -25,7 +28,10 @@ pub fn generate_and_save(path: &Path) -> anyhow::Result<RepoKey> {
 
 pub fn load(path: &Path) -> anyhow::Result<RepoKey> {
     let text = std::fs::read_to_string(path).with_context(|| {
-        format!("reading repo key {} (run `burrow init` first?)", path.display())
+        format!(
+            "reading repo key {} (run `burrow init` first?)",
+            path.display()
+        )
     })?;
     let text = text.trim();
     if text.len() != 64 {
@@ -60,7 +66,10 @@ pub fn load_or_create_device_name(path: &Path, preferred: Option<&str>) -> anyho
     let name = match preferred {
         Some(p) => {
             // Explicit names must be clean; defaults get sanitized below.
-            if p.is_empty() || !p.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            if p.is_empty()
+                || !p
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
             {
                 bail!("device name {p:?} must be non-empty [a-zA-Z0-9_-]");
             }
@@ -71,9 +80,19 @@ pub fn load_or_create_device_name(path: &Path, preferred: Option<&str>) -> anyho
             let base = host.split('.').next().unwrap_or("device");
             let clean: String = base
                 .chars()
-                .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                        c
+                    } else {
+                        '-'
+                    }
+                })
                 .collect();
-            if clean.is_empty() { "device".to_string() } else { clean }
+            if clean.is_empty() {
+                "device".to_string()
+            } else {
+                clean
+            }
         }
     };
     if let Some(parent) = path.parent() {
@@ -109,6 +128,9 @@ mod tests {
         let key = generate_and_save(&path).unwrap();
         let loaded = load(&path).unwrap();
         assert_eq!(key.as_bytes(), loaded.as_bytes());
-        assert!(generate_and_save(&path).is_err(), "must refuse to overwrite");
+        assert!(
+            generate_and_save(&path).is_err(),
+            "must refuse to overwrite"
+        );
     }
 }

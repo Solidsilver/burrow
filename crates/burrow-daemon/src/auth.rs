@@ -45,7 +45,11 @@ pub fn spawn_auth_loop(
                             Some((owner_pk, is_self)) => {
                                 conns.insert(
                                     m.connection_id,
-                                    ConnInfo { device: id, owner_pk, is_self },
+                                    ConnInfo {
+                                        device: id,
+                                        owner_pk,
+                                        is_self,
+                                    },
                                 );
                                 true
                             }
@@ -58,7 +62,11 @@ pub fn spawn_auth_loop(
                         allowed,
                         "blobs connection"
                     );
-                    let res = if allowed { Ok(()) } else { Err(AbortReason::Permission) };
+                    let res = if allowed {
+                        Ok(())
+                    } else {
+                        Err(AbortReason::Permission)
+                    };
                     m.tx.send(res).await.ok();
                 }
                 ProviderMessage::ConnectionClosed(m) => {

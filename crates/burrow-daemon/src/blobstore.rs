@@ -23,7 +23,11 @@ impl IrohBlobStore {
     /// Must be constructed on a runtime thread (captures the current handle);
     /// used from `spawn_blocking` threads.
     pub fn new(store: Store) -> Self {
-        Self { store, handle: tokio::runtime::Handle::current(), temp_tags: Vec::new() }
+        Self {
+            store,
+            handle: tokio::runtime::Handle::current(),
+            temp_tags: Vec::new(),
+        }
     }
 
     /// Hand over the GC guards for everything written so far. The caller must
@@ -52,7 +56,12 @@ impl BlobStore for IrohBlobStore {
         // temp_tag(), not the default with_tag(): the awaited form creates a
         // persistent auto tag per blob, which would defeat GC forever.
         let tag = self.handle.block_on(async move {
-            store.blobs().add_bytes(bytes).temp_tag().await.map_err(io_err)
+            store
+                .blobs()
+                .add_bytes(bytes)
+                .temp_tag()
+                .await
+                .map_err(io_err)
         })?;
         let hash = from_iroh_hash(tag.as_ref());
         self.temp_tags.push(tag);

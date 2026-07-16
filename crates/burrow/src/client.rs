@@ -12,8 +12,12 @@ pub async fn call(req: CtrlRequest) -> anyhow::Result<CtrlOk> {
             socket.display()
         )
     })?;
-    write_frame(&mut stream, &req).await.context("sending request to daemon")?;
-    let result: CtrlResult = read_frame(&mut stream).await.context("reading daemon reply")?;
+    write_frame(&mut stream, &req)
+        .await
+        .context("sending request to daemon")?;
+    let result: CtrlResult = read_frame(&mut stream)
+        .await
+        .context("reading daemon reply")?;
     result.map_err(|e| anyhow::anyhow!("{e}"))
 }
 
@@ -24,6 +28,10 @@ pub fn fmt_bytes(n: u64) -> String {
 
 pub fn fmt_time(unix: u64) -> String {
     chrono::DateTime::from_timestamp(unix as i64, 0)
-        .map(|t| t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string())
+        .map(|t| {
+            t.with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string()
+        })
         .unwrap_or_else(|| unix.to_string())
 }

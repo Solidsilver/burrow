@@ -8,7 +8,11 @@ use clap::{Parser, Subcommand};
 use client::{call, fmt_bytes, fmt_time};
 
 #[derive(Parser)]
-#[command(name = "burrow", version, about = "Distributed backup among friends, over iroh")]
+#[command(
+    name = "burrow",
+    version,
+    about = "Distributed backup among friends, over iroh"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -150,7 +154,9 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Init { name } => init(name),
-        Command::Daemon { command: DaemonCommand::Run } => {
+        Command::Daemon {
+            command: DaemonCommand::Run,
+        } => {
             tracing_subscriber::fmt()
                 .with_env_filter(
                     tracing_subscriber::EnvFilter::try_from_default_env()
@@ -161,23 +167,23 @@ async fn main() -> anyhow::Result<()> {
             burrow_daemon::daemon::run(config).await
         }
         Command::Status => status().await,
-        Command::Backup { command: BackupCommand::Run { backup_id } } => {
-            match call(CtrlRequest::BackupRun { backup_id }).await? {
-                CtrlOk::BackupDone(s) => {
-                    println!(
-                        "snapshot {} of {:?}: {} files ({} unchanged), {} read, {} new",
-                        fmt_time(s.created_at),
-                        s.backup_id,
-                        s.file_count,
-                        s.files_cached,
-                        fmt_bytes(s.bytes_scanned),
-                        fmt_bytes(s.bytes_new),
-                    );
-                    Ok(())
-                }
-                other => anyhow::bail!("unexpected reply: {other:?}"),
+        Command::Backup {
+            command: BackupCommand::Run { backup_id },
+        } => match call(CtrlRequest::BackupRun { backup_id }).await? {
+            CtrlOk::BackupDone(s) => {
+                println!(
+                    "snapshot {} of {:?}: {} files ({} unchanged), {} read, {} new",
+                    fmt_time(s.created_at),
+                    s.backup_id,
+                    s.file_count,
+                    s.files_cached,
+                    fmt_bytes(s.bytes_scanned),
+                    fmt_bytes(s.bytes_new),
+                );
+                Ok(())
             }
-        }
+            other => anyhow::bail!("unexpected reply: {other:?}"),
+        },
         Command::Snapshots { backup_id } => {
             match call(CtrlRequest::SnapshotList { backup_id }).await? {
                 CtrlOk::Snapshots(list) if list.is_empty() => {
@@ -205,16 +211,36 @@ async fn main() -> anyhow::Result<()> {
                 other => anyhow::bail!("unexpected reply: {other:?}"),
             }
         }
-        Command::Restore { backup_id, snapshot, target } => {
-            match call(CtrlRequest::Restore { backup_id, snapshot, target }).await? {
-                CtrlOk::RestoreDone { files, bytes, target } => {
-                    println!("restored {files} files ({}) to {}", fmt_bytes(bytes), target.display());
+        Command::Restore {
+            backup_id,
+            snapshot,
+            target,
+        } => {
+            match call(CtrlRequest::Restore {
+                backup_id,
+                snapshot,
+                target,
+            })
+            .await?
+            {
+                CtrlOk::RestoreDone {
+                    files,
+                    bytes,
+                    target,
+                } => {
+                    println!(
+                        "restored {files} files ({}) to {}",
+                        fmt_bytes(bytes),
+                        target.display()
+                    );
                     Ok(())
                 }
                 other => anyhow::bail!("unexpected reply: {other:?}"),
             }
         }
-        Command::Key { command: KeyCommand::Phrase } => {
+        Command::Key {
+            command: KeyCommand::Phrase,
+        } => {
             let key = burrow_daemon::keys::load(&burrow_daemon::paths::repo_key_file())?;
             print_recovery_phrase(&key);
             Ok(())
@@ -359,7 +385,10 @@ fn recover() -> anyhow::Result<()> {
     println!("your node identity is derived from it, so peers will recognize this machine.");
     println!();
     println!("next steps:");
-    println!("  1. create a config:            {}", burrow_daemon::paths::config_file().display());
+    println!(
+        "  1. create a config:            {}",
+        burrow_daemon::paths::config_file().display()
+    );
     println!("  2. start the daemon:           burrow daemon run");
     println!("  3. re-add one or more friends: burrow peer add <their-ticket> --name <name>");
     println!("  4. rebuild your catalog:       burrow resync");
@@ -370,22 +399,34 @@ fn recover() -> anyhow::Result<()> {
 async fn doctor() -> anyhow::Result<()> {
     let mut failures = 0;
     let check = |ok: bool, label: &str, detail: String| {
-        println!("{} {label}{}", if ok { "✓" } else { "✗" }, if detail.is_empty() {
-            String::new()
-        } else {
-            format!(" — {detail}")
-        });
+        println!(
+            "{} {label}{}",
+            if ok { "✓" } else { "✗" },
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(" — {detail}")
+            }
+        );
         !ok as u32
     };
 
     let config_path = burrow_daemon::paths::config_file();
     match burrow_daemon::config::Config::load(&config_path) {
         Ok(c) => {
-            failures += check(true, "config", format!("{} ({} backups)", config_path.display(), c.backups.len()));
+            failures += check(
+                true,
+                "config",
+                format!("{} ({} backups)", config_path.display(), c.backups.len()),
+            );
             for b in &c.backups {
                 for p in &b.paths {
                     if !p.exists() {
-                        failures += check(false, "backup path", format!("{} ({}) does not exist", p.display(), b.id));
+                        failures += check(
+                            false,
+                            "backup path",
+                            format!("{} ({}) does not exist", p.display(), b.id),
+                        );
                     }
                 }
             }
@@ -402,7 +443,11 @@ async fn doctor() -> anyhow::Result<()> {
 
     match call(CtrlRequest::Status).await {
         Ok(CtrlOk::Status(s)) => {
-            failures += check(true, "daemon", format!("v{} as {:?}", s.version, s.node_name));
+            failures += check(
+                true,
+                "daemon",
+                format!("v{} as {:?}", s.version, s.node_name),
+            );
             let id_hex: String = s.endpoint_id.iter().map(|b| format!("{b:02x}")).collect();
             println!("  endpoint id: {id_hex}");
         }
@@ -458,9 +503,13 @@ async fn peers_table() -> anyhow::Result<()> {
         println!("no peers yet — run `burrow peer invite` and swap tickets with a friend");
         return Ok(());
     }
-    let (given, received): (u64, u64) =
-        friends.iter().fold((0, 0), |acc, p| (acc.0 + p.given_bytes, acc.1 + p.received_bytes));
-    println!("{:<12} {:<10} {:<22} {:<22}", "PEER", "STATE", "YOU GIVE (used)", "YOU GET (used)");
+    let (given, received): (u64, u64) = friends.iter().fold((0, 0), |acc, p| {
+        (acc.0 + p.given_bytes, acc.1 + p.received_bytes)
+    });
+    println!(
+        "{:<12} {:<10} {:<22} {:<22}",
+        "PEER", "STATE", "YOU GIVE (used)", "YOU GET (used)"
+    );
     for p in &friends {
         let state = if p.state == "active" && p.approved_by_them == Some(false) {
             "await-them".to_string()
@@ -472,7 +521,11 @@ async fn peers_table() -> anyhow::Result<()> {
             p.name,
             state,
             format!("{} ({})", fmt_bytes(p.given_bytes), fmt_bytes(p.given_used)),
-            format!("{} ({})", fmt_bytes(p.received_bytes), fmt_bytes(p.received_used)),
+            format!(
+                "{} ({})",
+                fmt_bytes(p.received_bytes),
+                fmt_bytes(p.received_used)
+            ),
         );
         for d in &p.devices {
             let online = match d.online {
@@ -483,7 +536,11 @@ async fn peers_table() -> anyhow::Result<()> {
             println!("  └ {:<14} {:<8} {}", d.device_name, d.mode, online);
         }
     }
-    println!("\nratio: you give {} / you get {}", fmt_bytes(given), fmt_bytes(received));
+    println!(
+        "\nratio: you give {} / you get {}",
+        fmt_bytes(given),
+        fmt_bytes(received)
+    );
     Ok(())
 }
 
@@ -504,7 +561,11 @@ async fn device_join(ticket: String, device: Option<String>) -> anyhow::Result<(
     println!("this device is {name:?}");
 
     // If the daemon is up, link right away; otherwise leave the ticket for it.
-    match call(CtrlRequest::DeviceJoin { ticket: ticket.clone() }).await {
+    match call(CtrlRequest::DeviceJoin {
+        ticket: ticket.clone(),
+    })
+    .await
+    {
         Ok(CtrlOk::Done(msg)) => {
             println!("{msg}");
             Ok(())
@@ -522,7 +583,11 @@ async fn device_join(ticket: String, device: Option<String>) -> anyhow::Result<(
 }
 
 async fn requests_table() -> anyhow::Result<()> {
-    let CtrlOk::Pending { peers, space_requests } = call(CtrlRequest::PendingList).await? else {
+    let CtrlOk::Pending {
+        peers,
+        space_requests,
+    } = call(CtrlRequest::PendingList).await?
+    else {
         anyhow::bail!("unexpected reply");
     };
     if peers.is_empty() && space_requests.is_empty() {
@@ -536,8 +601,16 @@ async fn requests_table() -> anyhow::Result<()> {
             println!(
                 "  {}  (owner {}, devices: {})",
                 p.name,
-                p.owner_pk.iter().take(4).map(|b| format!("{b:02x}")).collect::<String>(),
-                if devs.is_empty() { "?".into() } else { devs.join(", ") },
+                p.owner_pk
+                    .iter()
+                    .take(4)
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>(),
+                if devs.is_empty() {
+                    "?".into()
+                } else {
+                    devs.join(", ")
+                },
             );
         }
     }
@@ -564,7 +637,11 @@ async fn status() -> anyhow::Result<()> {
         "burrow {} — {:?} ({}), device {:?} [{} mode]",
         s.version,
         s.node_name,
-        s.owner_pk.iter().take(4).map(|b| format!("{b:02x}")).collect::<String>(),
+        s.owner_pk
+            .iter()
+            .take(4)
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>(),
         s.device_name,
         s.mode,
     );
@@ -606,12 +683,20 @@ async fn status() -> anyhow::Result<()> {
             .offer_max
             .map(fmt_bytes)
             .unwrap_or_else(|| "unlimited (disk-bound)".into());
-        println!("  offering {offered}, holding {} total", fmt_bytes(s.hosting.held_total));
+        println!(
+            "  offering {offered}, holding {} total",
+            fmt_bytes(s.hosting.held_total)
+        );
         if s.hosting.grants.is_empty() {
             println!("  no grants to friends yet — `burrow grant <peer> <size>`");
         } else {
             for (name, granted, used) in &s.hosting.grants {
-                println!("  {:<12} granted {:<10} used {}", name, fmt_bytes(*granted), fmt_bytes(*used));
+                println!(
+                    "  {:<12} granted {:<10} used {}",
+                    name,
+                    fmt_bytes(*granted),
+                    fmt_bytes(*used)
+                );
             }
         }
     }
@@ -655,9 +740,7 @@ fn init(name: Option<String>) -> anyhow::Result<()> {
 
     let config_path = burrow_daemon::paths::config_file();
     if !config_path.exists() {
-        let node_name = name.unwrap_or_else(|| {
-            gethostname_or_default()
-        });
+        let node_name = name.unwrap_or_else(|| gethostname_or_default());
         std::fs::write(
             &config_path,
             format!(
@@ -679,7 +762,10 @@ name = "{node_name}"
         )?;
         println!("starter config written to {}", config_path.display());
     } else {
-        println!("config already exists at {}, leaving it alone", config_path.display());
+        println!(
+            "config already exists at {}, leaving it alone",
+            config_path.display()
+        );
     }
 
     print_recovery_phrase(&key);

@@ -8,7 +8,11 @@ use crate::daemon::AppState;
 /// seconds is also accepted.
 pub fn parse_cron(expr: &str) -> anyhow::Result<cron::Schedule> {
     let fields = expr.split_whitespace().count();
-    let normalized = if fields == 5 { format!("0 {expr}") } else { expr.to_string() };
+    let normalized = if fields == 5 {
+        format!("0 {expr}")
+    } else {
+        expr.to_string()
+    };
     cron::Schedule::from_str(&normalized)
         .map_err(|e| anyhow::anyhow!("invalid cron expression {expr:?}: {e}"))
 }
@@ -32,11 +36,13 @@ pub fn spawn_scheduler(state: std::sync::Weak<AppState>) {
             let now = chrono::Utc::now();
             for b in &state.config.backups {
                 let Some(expr) = &b.schedule else { continue };
-                let Ok(schedule) = parse_cron(expr) else { continue }; // validated at load
-                // Baseline on the last recorded snapshot, not daemon uptime:
-                // a laptop asleep over the 03:00 slot then catches up at next
-                // wake instead of silently skipping the day. Backups that
-                // never ran wait for their first regular slot.
+                let Ok(schedule) = parse_cron(expr) else {
+                    continue;
+                }; // validated at load
+                   // Baseline on the last recorded snapshot, not daemon uptime:
+                   // a laptop asleep over the 03:00 slot then catches up at next
+                   // wake instead of silently skipping the day. Backups that
+                   // never ran wait for their first regular slot.
                 let last_run = latest_run(&state, &b.id)
                     .await
                     .and_then(|ts| chrono::DateTime::from_timestamp(ts as i64, 0));
@@ -44,7 +50,11 @@ pub fn spawn_scheduler(state: std::sync::Weak<AppState>) {
                 if let Some(attempt) = last_attempt.get(&b.id) {
                     base = base.max(*attempt);
                 }
-                let due = schedule.after(&base).next().map(|t| t <= now).unwrap_or(false);
+                let due = schedule
+                    .after(&base)
+                    .next()
+                    .map(|t| t <= now)
+                    .unwrap_or(false);
                 if due {
                     last_attempt.insert(b.id.clone(), now);
                     tracing::info!(backup = %b.id, "scheduled backup starting");

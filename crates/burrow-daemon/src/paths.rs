@@ -7,7 +7,9 @@
 use std::path::PathBuf;
 
 fn home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/"))
 }
 
 pub fn config_dir() -> PathBuf {
@@ -68,7 +70,9 @@ pub fn socket_path() -> PathBuf {
     let uid = unsafe { libc::getuid() };
     #[cfg(not(unix))]
     let uid = 0;
-    runtime.join(format!("burrow-{uid}")).join(format!("{tag}.sock"))
+    runtime
+        .join(format!("burrow-{uid}"))
+        .join(format!("{tag}.sock"))
 }
 
 /// Bulk blob storage (own chunks + data held for friends, plus iroh's blob

@@ -237,7 +237,9 @@ impl Db {
             .with_context(|| format!("opening database {}", path.display()))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        migrations().to_latest(&mut conn).context("running database migrations")?;
+        migrations()
+            .to_latest(&mut conn)
+            .context("running database migrations")?;
 
         let (tx, rx) = std::sync::mpsc::channel::<Job>();
         std::thread::Builder::new()

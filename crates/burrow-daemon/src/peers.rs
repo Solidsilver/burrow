@@ -41,7 +41,10 @@ pub struct Caller {
     pub is_active: bool,
 }
 
-async fn resolve_caller(state: &Arc<AppState>, remote: EndpointId) -> anyhow::Result<Option<Caller>> {
+async fn resolve_caller(
+    state: &Arc<AppState>,
+    remote: EndpointId,
+) -> anyhow::Result<Option<Caller>> {
     let id = remote.as_bytes().to_vec();
     let row: Option<(Vec<u8>, String)> = state
         .db
@@ -70,11 +73,7 @@ async fn resolve_caller(state: &Arc<AppState>, remote: EndpointId) -> anyhow::Re
 // ---------- ctrl-side operations ----------
 
 pub async fn invite(state: &Arc<AppState>) -> anyhow::Result<String> {
-    let _ = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        state.endpoint.online(),
-    )
-    .await;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), state.endpoint.online()).await;
     let addr = state.endpoint.addr();
     Ok(EndpointTicket::from(addr).to_string())
 }
@@ -82,7 +81,11 @@ pub async fn invite(state: &Arc<AppState>) -> anyhow::Result<String> {
 /// Add a FRIEND from their ticket. (Own devices use `device join`, which is
 /// automatic — see `hello_via_ticket` + the Hello handler's self branch.)
 pub async fn add(state: &Arc<AppState>, ticket_str: &str, name: &str) -> anyhow::Result<String> {
-    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
         bail!("peer name must be non-empty [a-zA-Z0-9_-]");
     }
     let (reply, remote_id) = hello_via_ticket(state, ticket_str).await?;
@@ -105,7 +108,11 @@ pub async fn add(state: &Arc<AppState>, ticket_str: &str, name: &str) -> anyhow:
         .db
         .call(move |conn| {
             let existing_name: Option<String> = conn
-                .query_row("SELECT name FROM owners WHERE owner_pk = ?1", [&owner_pk], |r| r.get(0))
+                .query_row(
+                    "SELECT name FROM owners WHERE owner_pk = ?1",
+                    [&owner_pk],
+                    |r| r.get(0),
+                )
                 .ok();
             match existing_name {
                 Some(n) if n != name_owned => {
@@ -119,7 +126,9 @@ pub async fn add(state: &Arc<AppState>, ticket_str: &str, name: &str) -> anyhow:
                         rusqlite::params![owner_pk, name_owned, now],
                     )
                     .map_err(|e| match e {
-                        rusqlite::Error::SqliteFailure(_, Some(msg)) if msg.contains("owners.name") => {
+                        rusqlite::Error::SqliteFailure(_, Some(msg))
+                            if msg.contains("owners.name") =>
+                        {
                             anyhow::anyhow!("a different person is already named {name_owned:?}")
                         }
                         e => e.into(),
@@ -221,7 +230,13 @@ pub async fn owner_by_name(state: &Arc<AppState>, name: &str) -> anyhow::Result<
             conn.query_row(
                 "SELECT owner_pk, name, state FROM owners WHERE name = ?1",
                 [&name_owned],
-                |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)),
+                |r| {
+                    Ok((
+                        r.get::<_, Vec<u8>>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                },
             )
             .map_err(|e| match e {
                 rusqlite::Error::QueryReturnedNoRows => {
@@ -232,7 +247,10 @@ pub async fn owner_by_name(state: &Arc<AppState>, name: &str) -> anyhow::Result<
         })
         .await?;
     Ok(OwnerRow {
-        owner_pk: row.0.try_into().map_err(|_| anyhow::anyhow!("corrupt owner pk in db"))?,
+        owner_pk: row
+            .0
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("corrupt owner pk in db"))?,
         name: row.1,
         state: row.2,
     })
@@ -247,9 +265,8 @@ async fn devices_of(
     state
         .db
         .call(move |conn| {
-            let mut stmt = conn.prepare(
-                "SELECT endpoint_id, ticket FROM devices WHERE owner_pk = ?1",
-            )?;
+            let mut stmt =
+                conn.prepare("SELECT endpoint_id, ticket FROM devices WHERE owner_pk = ?1")?;
             let rows = stmt.query_map([&pk], |r| {
                 Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Option<String>>(1)?))
             })?;
@@ -356,7 +373,11 @@ pub async fn list(state: &Arc<AppState>) -> anyhow::Result<Vec<PeerInfo>> {
             }
             let state = state.clone();
             let device = dev.endpoint_id;
-            handles.push((oi, di, tokio::spawn(async move { refresh_device(&state, device).await })));
+            handles.push((
+                oi,
+                di,
+                tokio::spawn(async move { refresh_device(&state, device).await }),
+            ));
         }
     }
     for (oi, di, h) in handles {
@@ -403,7 +424,9 @@ pub async fn sync_from_own_devices(state: &Arc<AppState>) -> anyhow::Result<()> 
         .filter(|(id, _)| *id != my_device)
         .collect();
     for (device, ticket) in own_devices {
-        let Ok(addr) = dial_addr(device, &ticket) else { continue };
+        let Ok(addr) = dial_addr(device, &ticket) else {
+            continue;
+        };
         let reply = match tokio::time::timeout(
             std::time::Duration::from_secs(5),
             peer_call(&state.endpoint, addr, &PeerRequest::SyncPeers),
@@ -467,9 +490,11 @@ pub async fn refresh_device(state: &Arc<AppState>, device: [u8; 32]) -> anyhow::
             .db
             .call(move |conn| {
                 Ok(conn
-                    .query_row("SELECT ticket FROM devices WHERE endpoint_id = ?1", [&id], |r| {
-                        r.get(0)
-                    })
+                    .query_row(
+                        "SELECT ticket FROM devices WHERE endpoint_id = ?1",
+                        [&id],
+                        |r| r.get(0),
+                    )
                     .ok()
                     .flatten())
             })
@@ -548,7 +573,10 @@ pub async fn pending(
     state: &Arc<AppState>,
 ) -> anyhow::Result<(Vec<PeerInfo>, Vec<SpaceRequestInfo>)> {
     let owners = list(state).await?;
-    let pending: Vec<PeerInfo> = owners.into_iter().filter(|o| o.state == "pending_in").collect();
+    let pending: Vec<PeerInfo> = owners
+        .into_iter()
+        .filter(|o| o.state == "pending_in")
+        .collect();
     let requests = state
         .db
         .call(|conn| {
@@ -585,11 +613,16 @@ pub async fn approve(state: &Arc<AppState>, name: &str) -> anyhow::Result<String
     state
         .db
         .call(move |conn| {
-            conn.execute("UPDATE owners SET state = 'active' WHERE owner_pk = ?1", [&pk])?;
+            conn.execute(
+                "UPDATE owners SET state = 'active' WHERE owner_pk = ?1",
+                [&pk],
+            )?;
             Ok(())
         })
         .await?;
-    Ok(format!("peer {name:?} approved — all their devices are now trusted"))
+    Ok(format!(
+        "peer {name:?} approved — all their devices are now trusted"
+    ))
 }
 
 pub async fn deny(state: &Arc<AppState>, name: &str) -> anyhow::Result<String> {
@@ -646,7 +679,9 @@ pub async fn grant(state: &Arc<AppState>, name: &str, bytes: u64) -> anyhow::Res
         if others + bytes > ceiling {
             bail!(
                 "granting {} would exceed storage.offer_max ({}); {} already granted to others",
-                bytes, ceiling, others
+                bytes,
+                ceiling,
+                others
             );
         }
     }
@@ -658,11 +693,17 @@ pub async fn grant(state: &Arc<AppState>, name: &str, bytes: u64) -> anyhow::Res
         .db
         .call(move |conn| {
             let used: u64 = conn
-                .query_row("SELECT COALESCE(SUM(size), 0) FROM held WHERE owner_pk = ?1", [&pk], |r| {
-                    r.get(0)
-                })
+                .query_row(
+                    "SELECT COALESCE(SUM(size), 0) FROM held WHERE owner_pk = ?1",
+                    [&pk],
+                    |r| r.get(0),
+                )
                 .unwrap_or(0);
-            let deadline: Option<u64> = if bytes < used { Some(now + evac_window) } else { None };
+            let deadline: Option<u64> = if bytes < used {
+                Some(now + evac_window)
+            } else {
+                None
+            };
             conn.execute(
                 "INSERT INTO grants_given (owner_pk, granted_bytes, updated_at, shrink_deadline)
                  VALUES (?1, ?2, ?3, ?4)
@@ -672,7 +713,10 @@ pub async fn grant(state: &Arc<AppState>, name: &str, bytes: u64) -> anyhow::Res
                    shrink_deadline = excluded.shrink_deadline",
                 rusqlite::params![pk, bytes, now, deadline],
             )?;
-            conn.execute("DELETE FROM space_requests WHERE owner_pk = ?1", rusqlite::params![pk])?;
+            conn.execute(
+                "DELETE FROM space_requests WHERE owner_pk = ?1",
+                rusqlite::params![pk],
+            )?;
             Ok(bytes < used)
         })
         .await?;
@@ -681,9 +725,15 @@ pub async fn grant(state: &Arc<AppState>, name: &str, bytes: u64) -> anyhow::Res
     let mut notified = false;
     for (device, ticket) in devices_of(state, row.owner_pk).await? {
         if let Ok(addr) = dial_addr(device, &ticket) {
-            if peer_call(&state.endpoint, addr, &PeerRequest::GrantChanged { granted_bytes: bytes })
-                .await
-                .is_ok()
+            if peer_call(
+                &state.endpoint,
+                addr,
+                &PeerRequest::GrantChanged {
+                    granted_bytes: bytes,
+                },
+            )
+            .await
+            .is_ok()
             {
                 notified = true;
             }
@@ -692,7 +742,11 @@ pub async fn grant(state: &Arc<AppState>, name: &str, bytes: u64) -> anyhow::Res
     let mut msg = format!(
         "granted {} of this device's space to {name:?}{}",
         crate::config::fmt_size(bytes),
-        if notified { "" } else { " (unreachable right now; they'll learn of it when back)" }
+        if notified {
+            ""
+        } else {
+            " (unreachable right now; they'll learn of it when back)"
+        }
     );
     if shrunk_below_usage {
         msg.push_str(&format!(
@@ -703,7 +757,11 @@ pub async fn grant(state: &Arc<AppState>, name: &str, bytes: u64) -> anyhow::Res
     Ok(msg)
 }
 
-pub async fn request_space(state: &Arc<AppState>, name: &str, bytes: u64) -> anyhow::Result<String> {
+pub async fn request_space(
+    state: &Arc<AppState>,
+    name: &str,
+    bytes: u64,
+) -> anyhow::Result<String> {
     let row = owner_by_name(state, name).await?;
     if row.state == "self" {
         bail!("your own host devices serve you automatically — no request needed");
@@ -714,11 +772,17 @@ pub async fn request_space(state: &Arc<AppState>, name: &str, bytes: u64) -> any
     let (given_total, received_total) = totals(state).await?;
     let mut last_err = None;
     for (device, ticket) in devices_of(state, row.owner_pk).await? {
-        let Ok(addr) = dial_addr(device, &ticket) else { continue };
+        let Ok(addr) = dial_addr(device, &ticket) else {
+            continue;
+        };
         match peer_call(
             &state.endpoint,
             addr,
-            &PeerRequest::RequestSpace { bytes, given_total, received_total },
+            &PeerRequest::RequestSpace {
+                bytes,
+                given_total,
+                received_total,
+            },
         )
         .await
         {
@@ -777,9 +841,11 @@ async fn capacity_for(state: &Arc<AppState>, caller: &Caller) -> anyhow::Result<
         .db
         .call(move |conn| {
             let used_by_owner: u64 = conn
-                .query_row("SELECT COALESCE(SUM(size), 0) FROM held WHERE owner_pk = ?1", [&pk], |r| {
-                    r.get(0)
-                })
+                .query_row(
+                    "SELECT COALESCE(SUM(size), 0) FROM held WHERE owner_pk = ?1",
+                    [&pk],
+                    |r| r.get(0),
+                )
                 .unwrap_or(0);
             let held_total: u64 = conn
                 .query_row("SELECT COALESCE(SUM(size), 0) FROM held", [], |r| r.get(0))
@@ -787,7 +853,10 @@ async fn capacity_for(state: &Arc<AppState>, caller: &Caller) -> anyhow::Result<
             let granted = if is_self {
                 let friends_held = held_total - used_by_owner;
                 let physical = disk_free.map(|f| f + held_total).unwrap_or(u64::MAX);
-                offer_max.unwrap_or(physical).min(physical).saturating_sub(friends_held)
+                offer_max
+                    .unwrap_or(physical)
+                    .min(physical)
+                    .saturating_sub(friends_held)
             } else {
                 conn.query_row(
                     "SELECT granted_bytes FROM grants_given WHERE owner_pk = ?1",
@@ -820,7 +889,11 @@ async fn handle_inner(
     req: PeerRequest,
 ) -> anyhow::Result<PeerReply> {
     // Hello establishes identity; everything else requires a known caller.
-    if let PeerRequest::Hello { identity, proto_version } = req {
+    if let PeerRequest::Hello {
+        identity,
+        proto_version,
+    } = req
+    {
         return handle_hello(state, remote, identity, proto_version).await;
     }
     let Some(caller) = resolve_caller(state, remote).await? else {
@@ -833,9 +906,15 @@ async fn handle_inner(
 
     match req {
         PeerRequest::Hello { .. } => unreachable!("handled above"),
-        PeerRequest::RequestSpace { bytes, given_total, received_total } => {
+        PeerRequest::RequestSpace {
+            bytes,
+            given_total,
+            received_total,
+        } => {
             if caller.is_self {
-                return Ok(PeerReply::Error("own devices don't need space requests".into()));
+                return Ok(PeerReply::Error(
+                    "own devices don't need space requests".into(),
+                ));
             }
             let now = now_unix();
             state
@@ -888,9 +967,15 @@ async fn handle_inner(
             }
             Ok(PeerReply::GrantChangedAck)
         }
-        PeerRequest::RequestStore { hash, size, is_manifest } => {
+        PeerRequest::RequestStore {
+            hash,
+            size,
+            is_manifest,
+        } => {
             if state.config.device.mode == DeviceMode::Client {
-                return Ok(PeerReply::Error("client-mode device: does not host data".into()));
+                return Ok(PeerReply::Error(
+                    "client-mode device: does not host data".into(),
+                ));
             }
             let (granted, used) = capacity_for(state, &caller).await?;
             let already_held = {
@@ -930,7 +1015,11 @@ async fn handle_inner(
             // to on their side. fetch_blob probes the hash-verified size and
             // refuses before downloading if it wouldn't fit, so a peer can't
             // make us pull an arbitrarily large blob against a tiny grant.
-            let fetch_cap = if already_held { None } else { Some(granted.saturating_sub(used)) };
+            let fetch_cap = if already_held {
+                None
+            } else {
+                Some(granted.saturating_sub(used))
+            };
             crate::net::fetch_blob(state, remote, iroh_hash, fetch_cap)
                 .await
                 .map_err(|e| anyhow::anyhow!("fetching blob from you failed: {e:#}"))?;
@@ -1023,13 +1112,21 @@ async fn handle_inner(
                     )?;
                     let page = burrow_proto::peer::HELD_PAGE;
                     let rows = stmt.query_map(rusqlite::params![pk, page + 1, offset], |r| {
-                        Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, u64>(1)?, r.get::<_, bool>(2)?))
+                        Ok((
+                            r.get::<_, Vec<u8>>(0)?,
+                            r.get::<_, u64>(1)?,
+                            r.get::<_, bool>(2)?,
+                        ))
                     })?;
                     let mut entries = Vec::new();
                     for row in rows {
                         let (h, size, is_manifest) = row?;
                         if let Ok(hash) = <[u8; 32]>::try_from(h) {
-                            entries.push(burrow_proto::peer::HeldEntry { hash, size, is_manifest });
+                            entries.push(burrow_proto::peer::HeldEntry {
+                                hash,
+                                size,
+                                is_manifest,
+                            });
                         }
                     }
                     let more = entries.len() as u64 > page;
@@ -1041,7 +1138,9 @@ async fn handle_inner(
         }
         PeerRequest::SyncPeers => {
             if !caller.is_self {
-                return Ok(PeerReply::Error("peer sync is between your own devices only".into()));
+                return Ok(PeerReply::Error(
+                    "peer sync is between your own devices only".into(),
+                ));
             }
             let my_device = state.endpoint.id().as_bytes().to_vec();
             let (owners, devices) = state
@@ -1052,11 +1151,19 @@ async fn handle_inner(
                     )?;
                     let mut owners = Vec::new();
                     for row in stmt.query_map([], |r| {
-                        Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+                        Ok((
+                            r.get::<_, Vec<u8>>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, String>(2)?,
+                        ))
                     })? {
                         let (pk, name, st) = row?;
                         if let Ok(owner_pk) = <[u8; 32]>::try_from(pk) {
-                            owners.push(burrow_proto::peer::OwnerEntry { owner_pk, name, state: st });
+                            owners.push(burrow_proto::peer::OwnerEntry {
+                                owner_pk,
+                                name,
+                                state: st,
+                            });
                         }
                     }
                     let mut stmt = conn.prepare(
@@ -1120,7 +1227,9 @@ async fn handle_hello(
     }
     if !crate::net::verify_device_cert(&identity.owner_pk, remote, &identity.cert) {
         tracing::warn!(device = %remote.fmt_short(), "Hello with INVALID device certificate");
-        return Ok(PeerReply::Error("device certificate verification failed".into()));
+        return Ok(PeerReply::Error(
+            "device certificate verification failed".into(),
+        ));
     }
 
     let now = now_unix();
@@ -1132,8 +1241,11 @@ async fn handle_hello(
     } else {
         let pk = identity.owner_pk.to_vec();
         let device_id = remote.as_bytes().to_vec();
-        let (device_name, mode, owner_name) =
-            (identity.device_name.clone(), identity.mode.clone(), identity.owner_name.clone());
+        let (device_name, mode, owner_name) = (
+            identity.device_name.clone(),
+            identity.mode.clone(),
+            identity.owner_name.clone(),
+        );
         let state_str: String = state
             .db
             .call(move |conn| {

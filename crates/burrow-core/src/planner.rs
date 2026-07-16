@@ -47,8 +47,11 @@ pub struct Placement {
 /// `min_offsite` holders belong to other owners, add non-self placements
 /// beyond `target` until satisfied. Ties break on id, so plans are stable.
 pub fn plan(blobs: &[BlobNeed], peers: &[PeerSpace], self_owner: &OwnerId) -> Vec<Placement> {
-    let mut free: BTreeMap<DeviceId, (OwnerId, u64)> =
-        peers.iter().filter(|p| p.online).map(|p| (p.id, (p.owner, p.free))).collect();
+    let mut free: BTreeMap<DeviceId, (OwnerId, u64)> = peers
+        .iter()
+        .filter(|p| p.online)
+        .map(|p| (p.id, (p.owner, p.free)))
+        .collect();
 
     let deficit = |b: &BlobNeed, holders: &[(DeviceId, OwnerId)]| {
         let base = (b.target as i64) - holders.len() as i64;
@@ -57,7 +60,10 @@ pub fn plan(blobs: &[BlobNeed], peers: &[PeerSpace], self_owner: &OwnerId) -> Ve
         base.max(offsite_deficit)
     };
 
-    let mut ordered: Vec<&BlobNeed> = blobs.iter().filter(|b| deficit(b, &b.holders) > 0).collect();
+    let mut ordered: Vec<&BlobNeed> = blobs
+        .iter()
+        .filter(|b| deficit(b, &b.holders) > 0)
+        .collect();
     ordered.sort_by(|a, b| {
         deficit(b, &b.holders)
             .cmp(&deficit(a, &a.holders))
@@ -85,17 +91,20 @@ pub fn plan(blobs: &[BlobNeed], peers: &[PeerSpace], self_owner: &OwnerId) -> Ve
                             && (!require_offsite || owner != self_owner)
                             && (!diverse_only || !holder_owners.contains(owner))
                     })
-                    .max_by(|(id_a, (_, a)), (id_b, (_, b))| {
-                        a.cmp(b).then_with(|| id_b.cmp(id_a))
-                    })
+                    .max_by(|(id_a, (_, a)), (id_b, (_, b))| a.cmp(b).then_with(|| id_b.cmp(id_a)))
                     .map(|(id, (owner, _))| (*id, *owner))
             };
             // Owner-diverse first; same-owner-different-device as fallback.
             let picked = candidate(true).or_else(|| candidate(false));
-            let Some((device, owner)) = picked else { return false };
+            let Some((device, owner)) = picked else {
+                return false;
+            };
             free.get_mut(&device).unwrap().1 -= blob.size;
             holders.push((device, owner));
-            out.push(Placement { hash: blob.hash, device });
+            out.push(Placement {
+                hash: blob.hash,
+                device,
+            });
             true
         };
 
@@ -122,7 +131,12 @@ mod tests {
     const ME: OwnerId = [0xAA; 32];
 
     fn peer(n: u8, owner: u8, free: u64) -> PeerSpace {
-        PeerSpace { id: [n; 32], owner: [owner; 32], free, online: true }
+        PeerSpace {
+            id: [n; 32],
+            owner: [owner; 32],
+            free,
+            online: true,
+        }
     }
 
     fn blob(n: u8, size: u64, target: u32, min_offsite: u32, holders: &[(u8, u8)]) -> BlobNeed {
@@ -137,8 +151,11 @@ mod tests {
 
     #[test]
     fn never_places_twice_on_same_device() {
-        let placements =
-            plan(&[blob(1, 100, 3, 0, &[])], &[peer(1, 1, 1000), peer(2, 2, 1000)], &ME);
+        let placements = plan(
+            &[blob(1, 100, 3, 0, &[])],
+            &[peer(1, 1, 1000), peer(2, 2, 1000)],
+            &ME,
+        );
         assert_eq!(placements.len(), 2);
         assert_ne!(placements[0].device, placements[1].device);
     }
@@ -154,7 +171,10 @@ mod tests {
             .map(|p| peers.iter().find(|x| x.id == p.device).unwrap().owner[0])
             .collect();
         assert_eq!(placements.len(), 2);
-        assert!(owners.contains(&1) && owners.contains(&2), "owners used: {owners:?}");
+        assert!(
+            owners.contains(&1) && owners.contains(&2),
+            "owners used: {owners:?}"
+        );
     }
 
     #[test]
@@ -162,14 +182,23 @@ mod tests {
         // Only owner 1 has capacity for the second replica.
         let peers = [peer(1, 1, 10_000), peer(2, 1, 10_000)];
         let placements = plan(&[blob(1, 100, 2, 0, &[])], &peers, &ME);
-        assert_eq!(placements.len(), 2, "should use two devices of the same owner");
+        assert_eq!(
+            placements.len(),
+            2,
+            "should use two devices of the same owner"
+        );
     }
 
     #[test]
     fn min_offsite_forces_non_self_copy() {
         // My own NAS (owner ME) could hold everything; min_offsite=1 must
         // still land one copy on the friend's box.
-        let my_nas = PeerSpace { id: [1; 32], owner: ME, free: 1_000_000, online: true };
+        let my_nas = PeerSpace {
+            id: [1; 32],
+            owner: ME,
+            free: 1_000_000,
+            online: true,
+        };
         let friend = peer(2, 2, 1_000_000);
         let placements = plan(&[blob(1, 100, 1, 1, &[])], &[my_nas, friend], &ME);
         assert!(
@@ -183,7 +212,12 @@ mod tests {
         let friend_holds = blob(1, 100, 1, 1, &[(2, 2)]);
         let placements = plan(
             &[friend_holds],
-            &[PeerSpace { id: [1; 32], owner: ME, free: 1_000_000, online: true }],
+            &[PeerSpace {
+                id: [1; 32],
+                owner: ME,
+                free: 1_000_000,
+                online: true,
+            }],
             &ME,
         );
         assert!(placements.is_empty());
@@ -193,11 +227,22 @@ mod tests {
     fn respects_free_space_and_offline() {
         let peers = [
             peer(1, 1, 1000),
-            PeerSpace { id: [2; 32], owner: [2; 32], free: 1_000_000, online: false },
+            PeerSpace {
+                id: [2; 32],
+                owner: [2; 32],
+                free: 1_000_000,
+                online: false,
+            },
             peer(3, 3, 50),
         ];
         let placements = plan(&[blob(1, 600, 3, 0, &[])], &peers, &ME);
-        assert_eq!(placements, vec![Placement { hash: [1; 32], device: [1; 32] }]);
+        assert_eq!(
+            placements,
+            vec![Placement {
+                hash: [1; 32],
+                device: [1; 32]
+            }]
+        );
     }
 
     #[test]

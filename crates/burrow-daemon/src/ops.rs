@@ -80,7 +80,11 @@ pub async fn status(state: &Arc<AppState>) -> anyhow::Result<StatusInfo> {
                  WHERE g.owner_pk != ?1 ORDER BY o.name",
             )?;
             let rows = stmt.query_map([&self_pk], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, u64>(1)?, r.get::<_, u64>(2)?))
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, u64>(1)?,
+                    r.get::<_, u64>(2)?,
+                ))
             })?;
             let mut grants = Vec::new();
             for row in rows {
@@ -99,7 +103,11 @@ pub async fn status(state: &Arc<AppState>) -> anyhow::Result<StatusInfo> {
         endpoint_id: *state.endpoint.id().as_bytes(),
         owner_pk: state.owner_pk,
         backups,
-        hosting: burrow_proto::ctrl::HostingInfo { offer_max, held_total, grants },
+        hosting: burrow_proto::ctrl::HostingInfo {
+            offer_max,
+            held_total,
+            grants,
+        },
     })
 }
 
@@ -124,7 +132,12 @@ async fn replication_health(
                 rusqlite::params![id, target],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )?;
-            Ok(burrow_proto::ctrl::ReplicationHealth { total_blobs: total, satisfied, degraded, critical })
+            Ok(burrow_proto::ctrl::ReplicationHealth {
+                total_blobs: total,
+                satisfied,
+                degraded,
+                critical,
+            })
         })
         .await
 }
@@ -176,7 +189,11 @@ pub async fn backup_run(state: &Arc<AppState>, backup_id: &str) -> anyhow::Resul
                     if let Ok(chunks) = postcard::from_bytes(&chunks) {
                         cache.insert(
                             path,
-                            burrow_core::snapshot::FileCacheEntry { size, mtime, chunks },
+                            burrow_core::snapshot::FileCacheEntry {
+                                size,
+                                mtime,
+                                chunks,
+                            },
                         );
                     }
                 }
@@ -294,7 +311,11 @@ pub async fn backup_run(state: &Arc<AppState>, backup_id: &str) -> anyhow::Resul
             .iter()
             .filter_map(|e| match &e.kind {
                 EntryKind::File { chunks, .. } => Some(chunks.iter().map(|c| {
-                    (c.blob_hash.0, c.size as u64 + burrow_core::crypto::BLOB_OVERHEAD as u64, false)
+                    (
+                        c.blob_hash.0,
+                        c.size as u64 + burrow_core::crypto::BLOB_OVERHEAD as u64,
+                        false,
+                    )
                 })),
                 _ => None,
             })
@@ -369,7 +390,9 @@ pub async fn resync(state: &Arc<AppState>) -> anyhow::Result<String> {
         })
         .await?;
     if peers.is_empty() {
-        anyhow::bail!("no known devices — add one with `burrow peer add` or `burrow device join` first");
+        anyhow::bail!(
+            "no known devices — add one with `burrow peer add` or `burrow device join` first"
+        );
     }
 
     let now = std::time::SystemTime::now()
@@ -379,9 +402,15 @@ pub async fn resync(state: &Arc<AppState>) -> anyhow::Result<String> {
     let mut manifest_hashes: Vec<[u8; 32]> = Vec::new();
     let mut replicas = 0u64;
     for (peer_bytes, owner_bytes) in peers {
-        let Ok(id_arr) = <[u8; 32]>::try_from(peer_bytes) else { continue };
-        let Ok(owner_arr) = <[u8; 32]>::try_from(owner_bytes) else { continue };
-        let Ok(peer) = iroh::EndpointId::from_bytes(&id_arr) else { continue };
+        let Ok(id_arr) = <[u8; 32]>::try_from(peer_bytes) else {
+            continue;
+        };
+        let Ok(owner_arr) = <[u8; 32]>::try_from(owner_bytes) else {
+            continue;
+        };
+        let Ok(peer) = iroh::EndpointId::from_bytes(&id_arr) else {
+            continue;
+        };
         let mut offset = 0u64;
         let mut pages = 0u64;
         loop {
@@ -477,7 +506,11 @@ pub async fn resync(state: &Arc<AppState>) -> anyhow::Result<String> {
             .iter()
             .filter_map(|e| match &e.kind {
                 EntryKind::File { chunks, .. } => Some(chunks.iter().map(|c| {
-                    (c.blob_hash.0, c.size as u64 + burrow_core::crypto::BLOB_OVERHEAD as u64, false)
+                    (
+                        c.blob_hash.0,
+                        c.size as u64 + burrow_core::crypto::BLOB_OVERHEAD as u64,
+                        false,
+                    )
                 })),
                 _ => None,
             })
@@ -490,8 +523,11 @@ pub async fn resync(state: &Arc<AppState>) -> anyhow::Result<String> {
             .filter(|e| matches!(e.kind, EntryKind::File { .. }))
             .count() as u64;
         let chunk_count = manifest.referenced_blobs().len() as u64;
-        let (backup_id, created_at, total) =
-            (manifest.backup_id.clone(), manifest.created_at, manifest.total_bytes());
+        let (backup_id, created_at, total) = (
+            manifest.backup_id.clone(),
+            manifest.created_at,
+            manifest.total_bytes(),
+        );
         let inserted = state
             .db
             .call(move |conn| {
@@ -538,10 +574,14 @@ pub(crate) const ORPHAN_PLACEMENTS_SQL: &str = "SELECT device, blob_hash FROM pl
 /// from the surviving manifests, unpin pruned manifest tags, and release
 /// now-orphaned blobs from peers. Local orphans then fall to GC.
 async fn prune(state: &Arc<AppState>, cfg: &crate::config::BackupConfig) -> anyhow::Result<()> {
-    let Some(keep) = cfg.keep_last else { return Ok(()) };
+    let Some(keep) = cfg.keep_last else {
+        return Ok(());
+    };
     let backup_id = cfg.id.clone();
 
-    let (victims, survivors): (Vec<(u64, [u8; 32])>, Vec<[u8; 32]>) = {
+    // (victims: [(created_at, manifest_hash)], survivors: [manifest_hash])
+    type Partition = (Vec<(u64, [u8; 32])>, Vec<[u8; 32]>);
+    let (victims, survivors): Partition = {
         let id = backup_id.clone();
         state
             .db
@@ -556,7 +596,9 @@ async fn prune(state: &Arc<AppState>, cfg: &crate::config::BackupConfig) -> anyh
                 let mut victims = Vec::new();
                 let mut survivors = Vec::new();
                 for (i, (ts, hash)) in rows.into_iter().enumerate() {
-                    let Ok(h) = <[u8; 32]>::try_from(hash) else { continue };
+                    let Ok(h) = <[u8; 32]>::try_from(hash) else {
+                        continue;
+                    };
                     if i < keep as usize {
                         survivors.push(h);
                     } else {
@@ -641,9 +683,7 @@ async fn prune(state: &Arc<AppState>, cfg: &crate::config::BackupConfig) -> anyh
     // Ask peers to drop orphaned replicas.
     let mut per_peer: std::collections::HashMap<[u8; 32], Vec<[u8; 32]>> = Default::default();
     for (peer, hash) in orphans {
-        if let (Ok(p), Ok(h)) =
-            (<[u8; 32]>::try_from(peer), <[u8; 32]>::try_from(hash))
-        {
+        if let (Ok(p), Ok(h)) = (<[u8; 32]>::try_from(peer), <[u8; 32]>::try_from(hash)) {
             per_peer.entry(p).or_default().push(h);
         }
     }
@@ -664,7 +704,13 @@ async fn fetch_missing(
 ) -> anyhow::Result<()> {
     let mut missing = Vec::new();
     for h in hashes {
-        if !state.blobs.blobs().has(to_iroh_hash(h)).await.unwrap_or(false) {
+        if !state
+            .blobs
+            .blobs()
+            .has(to_iroh_hash(h))
+            .await
+            .unwrap_or(false)
+        {
             missing.push(*h);
         }
     }
@@ -698,8 +744,12 @@ async fn fetch_missing(
         let mut fetched = false;
         let mut last_err = None;
         for holder in holders {
-            let Ok(id_arr) = <[u8; 32]>::try_from(holder) else { continue };
-            let Ok(peer) = iroh::EndpointId::from_bytes(&id_arr) else { continue };
+            let Ok(id_arr) = <[u8; 32]>::try_from(holder) else {
+                continue;
+            };
+            let Ok(peer) = iroh::EndpointId::from_bytes(&id_arr) else {
+                continue;
+            };
             match crate::net::fetch_blob(state, peer, to_iroh_hash(h), None).await {
                 Ok(()) => {
                     fetched = true;
@@ -785,15 +835,17 @@ pub async fn restore(
     // Make sure every needed blob is local, pulling from replica holders for
     // anything missing (e.g. this machine lost its blob store).
     let manifest_hash = burrow_core::BlobHash(info.manifest_hash);
-    fetch_missing(state, &[manifest_hash]).await.with_context(|| {
-        format!(
-            "snapshot {} is not restorable right now: its manifest is neither local nor \
+    fetch_missing(state, &[manifest_hash])
+        .await
+        .with_context(|| {
+            format!(
+                "snapshot {} is not restorable right now: its manifest is neither local nor \
              held by a reachable peer (it may not have finished replicating before this \
              machine lost data, or the holder is offline). `burrow snapshots {}` lists \
              other snapshots to try.",
-            info.created_at, backup_id
-        )
-    })?;
+                info.created_at, backup_id
+            )
+        })?;
     let manifest_bytes = state
         .blobs
         .blobs()

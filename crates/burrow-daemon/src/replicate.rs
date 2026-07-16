@@ -46,10 +46,7 @@ pub fn spawn_replication_loop(state: std::sync::Weak<AppState>) {
 }
 
 /// Per-backup replica knobs, deduped per blob across backups.
-fn blob_targets_for(
-    state: &Arc<AppState>,
-    backups_csv: &str,
-) -> Option<(u32, u32)> {
+fn blob_targets_for(state: &Arc<AppState>, backups_csv: &str) -> Option<(u32, u32)> {
     let mut target = None;
     let mut offsite = 0u32;
     for id in backups_csv.split(',') {
@@ -95,7 +92,12 @@ pub async fn tick(state: &Arc<AppState>) -> anyhow::Result<usize> {
         let rows: Vec<([u8; 32], DeviceId, OwnerId, u64)> = placements
             .iter()
             .filter_map(|p| {
-                Some((p.hash, p.device, *owner_of.get(&p.device)?, *sizes.get(&p.hash)?))
+                Some((
+                    p.hash,
+                    p.device,
+                    *owner_of.get(&p.device)?,
+                    *sizes.get(&p.hash)?,
+                ))
             })
             .collect();
         state
@@ -132,7 +134,10 @@ pub async fn tick(state: &Arc<AppState>) -> anyhow::Result<usize> {
         let is_manifest = manifests.contains(&p.hash);
         handles.push(tokio::spawn(async move {
             let _permit = sem.acquire().await.ok()?;
-            Some((p.clone(), execute_placement(&state, &p, size, is_manifest).await))
+            Some((
+                p.clone(),
+                execute_placement(&state, &p, size, is_manifest).await,
+            ))
         }));
     }
     let mut ok = 0;
@@ -149,7 +154,11 @@ pub async fn tick(state: &Arc<AppState>) -> anyhow::Result<usize> {
             }
         }
     }
-    tracing::info!(succeeded = ok, attempted = placements.len(), "replication pass done");
+    tracing::info!(
+        succeeded = ok,
+        attempted = placements.len(),
+        "replication pass done"
+    );
 
     if let Err(e) = rebalance(state).await {
         tracing::warn!("rebalance failed: {e:#}");
@@ -166,7 +175,11 @@ async fn dial_ticket(state: &Arc<AppState>, device: DeviceId) -> Option<String> 
         .db
         .call(move |conn| {
             Ok(conn
-                .query_row("SELECT ticket FROM devices WHERE endpoint_id = ?1", [&id], |r| r.get(0))
+                .query_row(
+                    "SELECT ticket FROM devices WHERE endpoint_id = ?1",
+                    [&id],
+                    |r| r.get(0),
+                )
                 .ok()
                 .flatten())
         })
@@ -194,7 +207,11 @@ async fn execute_placement(
     let reply = peer_call(
         &state.endpoint,
         addr,
-        &PeerRequest::RequestStore { hash: p.hash, size, is_manifest },
+        &PeerRequest::RequestStore {
+            hash: p.hash,
+            size,
+            is_manifest,
+        },
     )
     .await?;
     let now = now_unix();
@@ -251,7 +268,11 @@ async fn gather(state: &Arc<AppState>) -> anyhow::Result<(Vec<BlobNeed>, Vec<Pee
             )?;
             let mut needs = Vec::new();
             let rows = stmt.query_map([], |r| {
-                Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, u64>(1)?, r.get::<_, String>(2)?))
+                Ok((
+                    r.get::<_, Vec<u8>>(0)?,
+                    r.get::<_, u64>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
             })?;
             for row in rows {
                 let (hash, size, ids) = row?;
@@ -324,7 +345,9 @@ async fn gather(state: &Arc<AppState>) -> anyhow::Result<(Vec<BlobNeed>, Vec<Pee
     // counting as holders so the planner re-places them; rebalance releases
     // them once covered elsewhere.
     for (id_bytes, _, granted, used) in &device_rows {
-        let Ok(device) = <[u8; 32]>::try_from(id_bytes.as_slice()) else { continue };
+        let Ok(device) = <[u8; 32]>::try_from(id_bytes.as_slice()) else {
+            continue;
+        };
         if used <= granted {
             continue;
         }
@@ -387,7 +410,12 @@ async fn gather(state: &Arc<AppState>) -> anyhow::Result<(Vec<BlobNeed>, Vec<Pee
                     free: q.granted_to_you.saturating_sub(q.used_by_you),
                     online: true,
                 }),
-                Err(_) => Some(PeerSpace { id: device, owner, free: 0, online: false }),
+                Err(_) => Some(PeerSpace {
+                    id: device,
+                    owner,
+                    free: 0,
+                    online: false,
+                }),
             }
         }));
     }
@@ -502,7 +530,9 @@ async fn rebalance(state: &Arc<AppState>) -> anyhow::Result<()> {
         );
     }
 
-    let mut per_blob: HashMap<[u8; 32], Vec<(DeviceId, OwnerId, u64, u64)>> = HashMap::new();
+    // blob hash -> [(device, owner, version, size)]
+    type Holders = HashMap<[u8; 32], Vec<(DeviceId, OwnerId, u64, u64)>>;
+    let mut per_blob: Holders = HashMap::new();
     let mut usage: HashMap<DeviceId, u64> = HashMap::new();
     for (h, d, o, v, s) in &holder_rows {
         per_blob.entry(*h).or_default().push((*d, *o, *v, *s));
@@ -577,7 +607,9 @@ async fn rebalance(state: &Arc<AppState>) -> anyhow::Result<()> {
         let mut mine: Vec<([u8; 32], u64, u64, OwnerId)> = per_blob
             .iter()
             .filter_map(|(h, hs)| {
-                hs.iter().find(|(d, _, _, _)| *d == device).map(|(_, o, v, s)| (*h, *v, *s, *o))
+                hs.iter()
+                    .find(|(d, _, _, _)| *d == device)
+                    .map(|(_, o, v, s)| (*h, *v, *s, *o))
             })
             .collect();
         mine.sort_by_key(|(_, v, _, _)| *v);
@@ -599,14 +631,15 @@ async fn rebalance(state: &Arc<AppState>) -> anyhow::Result<()> {
                 .map(|hs| {
                     hs.iter()
                         .filter(|(d, _, _, _)| {
-                            *d != device
-                                && !to_release.get(d).is_some_and(|v| v.contains(&hash))
+                            *d != device && !to_release.get(d).is_some_and(|v| v.contains(&hash))
                         })
                         .collect()
                 })
                 .unwrap_or_default();
-            let remaining_offsite =
-                remaining.iter().filter(|(_, o, _, _)| *o != self_owner).count() as u32;
+            let remaining_offsite = remaining
+                .iter()
+                .filter(|(_, o, _, _)| *o != self_owner)
+                .count() as u32;
             if remaining.len() as u32 >= target && remaining_offsite >= min_offsite {
                 to_release.entry(device).or_default().push(hash);
                 excess = excess.saturating_sub(size);
@@ -638,8 +671,14 @@ pub async fn release_from_device(
     hashes: &[[u8; 32]],
 ) -> anyhow::Result<()> {
     let addr = dial(state, device).await?;
-    let reply =
-        peer_call(&state.endpoint, addr, &PeerRequest::Release { hashes: hashes.to_vec() }).await?;
+    let reply = peer_call(
+        &state.endpoint,
+        addr,
+        &PeerRequest::Release {
+            hashes: hashes.to_vec(),
+        },
+    )
+    .await?;
     match reply {
         PeerReply::ReleaseAck { dropped } => {
             let short = EndpointId::from_bytes(&device)
@@ -731,7 +770,10 @@ async fn evict_overdue(state: &Arc<AppState>) -> anyhow::Result<()> {
             })
             .await?;
         if evicted > 0 {
-            tracing::warn!(evicted, "shrink deadline passed — evicted data down to grant");
+            tracing::warn!(
+                evicted,
+                "shrink deadline passed — evicted data down to grant"
+            );
         }
     }
     Ok(())

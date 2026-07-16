@@ -4,14 +4,14 @@
 pub mod auth;
 pub mod blobstore;
 pub mod config;
-pub mod net;
-pub mod peers;
 pub mod ctrl;
 pub mod daemon;
 pub mod db;
 pub mod keys;
+pub mod net;
 pub mod ops;
 pub mod paths;
+pub mod peers;
 pub mod replicate;
 pub mod scheduler;
 pub mod sys;

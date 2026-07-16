@@ -114,15 +114,18 @@ pub fn create_snapshot<S: BlobStore>(
             } else {
                 format!("{prefix}/{}", path_to_manifest_string(&rel_in_root))
             };
-            let meta =
-                item.metadata().map_err(|e| CoreError::Io(std::io::Error::other(e.to_string())))?;
+            let meta = item
+                .metadata()
+                .map_err(|e| CoreError::Io(std::io::Error::other(e.to_string())))?;
             let (mode, mtime, mtime_nanos) = mode_and_mtime(&meta);
 
             let kind = if item.file_type().is_dir() {
                 EntryKind::Dir
             } else if item.file_type().is_symlink() {
                 let target = fs::read_link(item.path())?;
-                EntryKind::Symlink { target: target.to_string_lossy().into_owned() }
+                EntryKind::Symlink {
+                    target: target.to_string_lossy().into_owned(),
+                }
             } else if item.file_type().is_file() {
                 // Cache hit: same size+mtime and every chunk still stored —
                 // reuse the refs without reading the file at all.
@@ -162,17 +165,29 @@ pub fn create_snapshot<S: BlobStore>(
                 if mtime < opts.cache_cutoff {
                     new_cache.insert(
                         manifest_path.clone(),
-                        FileCacheEntry { size: file_size, mtime: mtime_nanos, chunks: chunks.clone() },
+                        FileCacheEntry {
+                            size: file_size,
+                            mtime: mtime_nanos,
+                            chunks: chunks.clone(),
+                        },
                     );
                 }
-                EntryKind::File { size: file_size, chunks }
+                EntryKind::File {
+                    size: file_size,
+                    chunks,
+                }
             } else {
                 continue; // sockets, fifos, devices: not backed up
             };
 
             entries.insert(
                 manifest_path.clone(),
-                Entry { path: manifest_path, kind, mode, mtime },
+                Entry {
+                    path: manifest_path,
+                    kind,
+                    mode,
+                    mtime,
+                },
             );
         }
     }
@@ -216,7 +231,9 @@ pub fn restore_snapshot<S: BlobStore>(
         let dest = safe_join(target, &entry.path)?;
         match &entry.kind {
             EntryKind::Dir => fs::create_dir_all(&dest)?,
-            EntryKind::Symlink { target: link_target } => {
+            EntryKind::Symlink {
+                target: link_target,
+            } => {
                 if let Some(parent) = dest.parent() {
                     fs::create_dir_all(parent)?;
                 }
@@ -304,8 +321,12 @@ fn build_globset(patterns: &[String]) -> Result<Excludes> {
         }
     }
     Ok(Excludes {
-        anchored: anchored.build().map_err(|e| CoreError::Pattern(e.to_string()))?,
-        component: component.build().map_err(|e| CoreError::Pattern(e.to_string()))?,
+        anchored: anchored
+            .build()
+            .map_err(|e| CoreError::Pattern(e.to_string()))?,
+        component: component
+            .build()
+            .map_err(|e| CoreError::Pattern(e.to_string()))?,
     })
 }
 
@@ -339,7 +360,10 @@ fn mode_and_mtime(meta: &fs::Metadata) -> (u32, i64, i64) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        let nanos = meta.mtime().saturating_mul(1_000_000_000).saturating_add(meta.mtime_nsec());
+        let nanos = meta
+            .mtime()
+            .saturating_mul(1_000_000_000)
+            .saturating_add(meta.mtime_nsec());
         (meta.mode(), meta.mtime(), nanos)
     }
     #[cfg(not(unix))]
@@ -407,11 +431,27 @@ mod tests {
         let src = tempfile::tempdir().unwrap();
         build_tree(src.path());
         let mut store = MemStore::new();
-        let result =
-            create_snapshot(&mut store, &testkey(), &[src.path().to_path_buf()], &opts(), &FileCache::new()).unwrap();
+        let result = create_snapshot(
+            &mut store,
+            &testkey(),
+            &[src.path().to_path_buf()],
+            &opts(),
+            &FileCache::new(),
+        )
+        .unwrap();
 
-        let paths: Vec<&str> = result.manifest.entries.iter().map(|e| e.path.as_str()).collect();
-        assert!(!paths.iter().any(|p| p.contains(".cache") || p.ends_with(".tmp")), "{paths:?}");
+        let paths: Vec<&str> = result
+            .manifest
+            .entries
+            .iter()
+            .map(|e| e.path.as_str())
+            .collect();
+        assert!(
+            !paths
+                .iter()
+                .any(|p| p.contains(".cache") || p.ends_with(".tmp")),
+            "{paths:?}"
+        );
 
         let dst = tempfile::tempdir().unwrap();
         let target = dst.path().join("restored");
@@ -449,8 +489,14 @@ mod tests {
 
         let dst = tempfile::tempdir().unwrap();
         restore_snapshot(&store, &testkey(), &result.manifest_hash, dst.path()).unwrap();
-        assert_eq!(fs::read(dst.path().join(prefixed(a.path(), "a.txt"))).unwrap(), b"aaa");
-        assert_eq!(fs::read(dst.path().join(prefixed(b.path(), "b.txt"))).unwrap(), b"bbb");
+        assert_eq!(
+            fs::read(dst.path().join(prefixed(a.path(), "a.txt"))).unwrap(),
+            b"aaa"
+        );
+        assert_eq!(
+            fs::read(dst.path().join(prefixed(b.path(), "b.txt"))).unwrap(),
+            b"bbb"
+        );
     }
 
     #[test]
@@ -459,20 +505,30 @@ mod tests {
         build_tree(src.path());
         let roots = [src.path().to_path_buf()];
         let mut store = MemStore::new();
-        let first = create_snapshot(&mut store, &testkey(), &roots, &opts(), &FileCache::new()).unwrap();
+        let first =
+            create_snapshot(&mut store, &testkey(), &roots, &opts(), &FileCache::new()).unwrap();
         assert!(!first.new_blobs.is_empty());
 
         // No changes: second snapshot must write zero new data blobs.
-        let second = create_snapshot(&mut store, &testkey(), &roots, &opts(), &first.cache).unwrap();
-        assert!(second.new_blobs.is_empty(), "unchanged tree re-uploaded {:?}", second.new_blobs);
+        let second =
+            create_snapshot(&mut store, &testkey(), &roots, &opts(), &first.cache).unwrap();
+        assert!(
+            second.new_blobs.is_empty(),
+            "unchanged tree re-uploaded {:?}",
+            second.new_blobs
+        );
         assert_eq!(second.bytes_new, 0);
         assert_eq!(second.bytes_scanned, 0, "cache hits must not re-read files");
-        assert_eq!(second.files_cached, 2, "both regular files should be cache hits");
+        assert_eq!(
+            second.files_cached, 2,
+            "both regular files should be cache hits"
+        );
         assert_eq!(second.manifest_hash, first.manifest_hash);
 
         // Touch one small file: only that file's chunk should be new.
         fs::write(src.path().join("hello.txt"), b"hello again").unwrap();
-        let third = create_snapshot(&mut store, &testkey(), &roots, &opts(), &second.cache).unwrap();
+        let third =
+            create_snapshot(&mut store, &testkey(), &roots, &opts(), &second.cache).unwrap();
         assert_eq!(third.new_blobs.len(), 1);
     }
 
@@ -525,12 +581,16 @@ mod tests {
         fs::write(src.path().join("hot.txt"), b"just written").unwrap();
         let roots = [src.path().to_path_buf()];
         let mut store = MemStore::new();
-        let hot_opts = SnapshotOptions { cache_cutoff: 0, ..opts() };
+        let hot_opts = SnapshotOptions {
+            cache_cutoff: 0,
+            ..opts()
+        };
         let first =
             create_snapshot(&mut store, &testkey(), &roots, &hot_opts, &FileCache::new()).unwrap();
         assert!(first.cache.is_empty(), "hot file must not enter the cache");
 
-        let second = create_snapshot(&mut store, &testkey(), &roots, &hot_opts, &first.cache).unwrap();
+        let second =
+            create_snapshot(&mut store, &testkey(), &roots, &hot_opts, &first.cache).unwrap();
         assert_eq!(second.files_cached, 0);
         assert!(second.bytes_scanned > 0, "hot file must be re-read");
         // Content unchanged, so dedup still means no new blobs.
@@ -559,9 +619,16 @@ mod tests {
             &FileCache::new(),
         )
         .unwrap();
-        let paths: Vec<&str> = result.manifest.entries.iter().map(|e| e.path.as_str()).collect();
+        let paths: Vec<&str> = result
+            .manifest
+            .entries
+            .iter()
+            .map(|e| e.path.as_str())
+            .collect();
         assert!(
-            !paths.iter().any(|p| p.contains("node_modules") || p.ends_with(".tmp")),
+            !paths
+                .iter()
+                .any(|p| p.contains("node_modules") || p.ends_with(".tmp")),
             "nested excludes must apply: {paths:?}"
         );
         assert!(paths.iter().any(|p| p.ends_with("main.rs")));
@@ -576,7 +643,10 @@ mod tests {
         fs::write(src.path().join("keep/cache/keep.txt"), b"y").unwrap();
 
         let mut store = MemStore::new();
-        let snapshot_opts = SnapshotOptions { exclude: vec!["cache/**".into()], ..opts() };
+        let snapshot_opts = SnapshotOptions {
+            exclude: vec!["cache/**".into()],
+            ..opts()
+        };
         let result = create_snapshot(
             &mut store,
             &testkey(),
@@ -585,7 +655,12 @@ mod tests {
             &FileCache::new(),
         )
         .unwrap();
-        let paths: Vec<&str> = result.manifest.entries.iter().map(|e| e.path.as_str()).collect();
+        let paths: Vec<&str> = result
+            .manifest
+            .entries
+            .iter()
+            .map(|e| e.path.as_str())
+            .collect();
         assert!(!paths.iter().any(|p| p.ends_with("drop.txt")), "{paths:?}");
         assert!(
             paths.iter().any(|p| p.ends_with("keep/cache/keep.txt")),
@@ -600,16 +675,28 @@ mod tests {
         let src = tempfile::tempdir().unwrap();
         let file = src.path().join("data.txt");
         fs::write(&file, b"version one!").unwrap();
-        filetime::set_file_mtime(&file, filetime::FileTime::from_unix_time(1_600_000_000, 111)).unwrap();
+        filetime::set_file_mtime(
+            &file,
+            filetime::FileTime::from_unix_time(1_600_000_000, 111),
+        )
+        .unwrap();
         let roots = [src.path().to_path_buf()];
         let mut store = MemStore::new();
         let first =
             create_snapshot(&mut store, &testkey(), &roots, &opts(), &FileCache::new()).unwrap();
 
         fs::write(&file, b"version two!").unwrap(); // same length
-        filetime::set_file_mtime(&file, filetime::FileTime::from_unix_time(1_600_000_000, 222)).unwrap();
-        let second = create_snapshot(&mut store, &testkey(), &roots, &opts(), &first.cache).unwrap();
-        assert_eq!(second.files_cached, 0, "same-second rewrite must not hit the cache");
+        filetime::set_file_mtime(
+            &file,
+            filetime::FileTime::from_unix_time(1_600_000_000, 222),
+        )
+        .unwrap();
+        let second =
+            create_snapshot(&mut store, &testkey(), &roots, &opts(), &first.cache).unwrap();
+        assert_eq!(
+            second.files_cached, 0,
+            "same-second rewrite must not hit the cache"
+        );
         assert_eq!(second.new_blobs.len(), 1, "changed content must be stored");
     }
 

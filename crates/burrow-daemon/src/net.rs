@@ -75,7 +75,9 @@ pub struct PeerProtocol {
 
 impl PeerProtocol {
     pub fn new(state: &Arc<AppState>) -> Self {
-        Self { state: Arc::downgrade(state) }
+        Self {
+            state: Arc::downgrade(state),
+        }
     }
 }
 
@@ -163,10 +165,17 @@ pub async fn fetch_blob(
             .await
             .map_err(|e| anyhow::anyhow!("probing blob size: {e}"))?;
         if size > max {
-            anyhow::bail!("blob is {size} bytes, over the {max} bytes available — refusing to fetch");
+            anyhow::bail!(
+                "blob is {size} bytes, over the {max} bytes available — refusing to fetch"
+            );
         }
     }
-    state.blobs.remote().execute_get(conn, local.missing()).await.context("fetching blob")?;
+    state
+        .blobs
+        .remote()
+        .execute_get(conn, local.missing())
+        .await
+        .context("fetching blob")?;
     // Fresh, verified bytes: clear any earlier quarantine for this hash.
     quarantine(state, hash, false).await?;
     Ok(())
@@ -185,7 +194,11 @@ async fn local_blob_valid(blobs: &iroh_blobs::api::Store, hash: iroh_blobs::Hash
         .is_ok()
 }
 
-async fn quarantine(state: &Arc<AppState>, hash: iroh_blobs::Hash, add: bool) -> anyhow::Result<()> {
+async fn quarantine(
+    state: &Arc<AppState>,
+    hash: iroh_blobs::Hash,
+    add: bool,
+) -> anyhow::Result<()> {
     let h = hash.as_bytes().to_vec();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -234,11 +247,17 @@ pub async fn peer_call_with_timeout(
     timeout: Duration,
 ) -> anyhow::Result<PeerReply> {
     let fut = async {
-        let conn = endpoint.connect(addr, PEER_ALPN).await.context("connecting to peer")?;
+        let conn = endpoint
+            .connect(addr, PEER_ALPN)
+            .await
+            .context("connecting to peer")?;
         let (mut send, mut recv) = conn.open_bi().await?;
         send.write_all(&postcard::to_allocvec(req)?).await?;
         send.finish()?;
-        let bytes = recv.read_to_end(MAX_PEER_MSG).await.context("reading peer reply")?;
+        let bytes = recv
+            .read_to_end(MAX_PEER_MSG)
+            .await
+            .context("reading peer reply")?;
         conn.close(0u32.into(), b"done");
         Ok::<PeerReply, anyhow::Error>(postcard::from_bytes(&bytes)?)
     };

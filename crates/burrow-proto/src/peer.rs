@@ -28,10 +28,17 @@ pub struct DeviceIdentity {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PeerRequest {
     /// Introduce yourself; also used to re-sync names and approval state.
-    Hello { identity: DeviceIdentity, proto_version: u32 },
+    Hello {
+        identity: DeviceIdentity,
+        proto_version: u32,
+    },
     /// Ask the remote to reserve space for us. Totals are self-reported
     /// context for the human who approves (advisory ratio).
-    RequestSpace { bytes: u64, given_total: u64, received_total: u64 },
+    RequestSpace {
+        bytes: u64,
+        given_total: u64,
+        received_total: u64,
+    },
     /// Notify that our grant to the remote changed (grow/shrink/revoke).
     GrantChanged { granted_bytes: u64 },
     /// Ask what the remote currently grants us and how much we use.
@@ -39,7 +46,11 @@ pub enum PeerRequest {
     /// Ask the remote to hold a blob for us. On accept, the remote pulls the
     /// blob from us over iroh-blobs before replying, so a success reply means
     /// the replica exists.
-    RequestStore { hash: [u8; 32], size: u64, is_manifest: bool },
+    RequestStore {
+        hash: [u8; 32],
+        size: u64,
+        is_manifest: bool,
+    },
     /// Tell the remote it may drop blobs of ours it holds.
     Release { hashes: Vec<[u8; 32]> },
     /// List blobs of ours the remote holds (paginated; disaster recovery).
@@ -85,9 +96,17 @@ pub enum PeerReply {
     QuotaStatus(QuotaReply),
     /// Blob fetched and stored (or already present).
     StoreDone,
-    ReleaseAck { dropped: u32 },
-    HeldPage { entries: Vec<HeldEntry>, more: bool },
-    PeersSnapshot { owners: Vec<OwnerEntry>, devices: Vec<DeviceEntry> },
+    ReleaseAck {
+        dropped: u32,
+    },
+    HeldPage {
+        entries: Vec<HeldEntry>,
+        more: bool,
+    },
+    PeersSnapshot {
+        owners: Vec<OwnerEntry>,
+        devices: Vec<DeviceEntry>,
+    },
     /// Request refused (unknown peer, not approved, malformed…).
     Error(String),
 }

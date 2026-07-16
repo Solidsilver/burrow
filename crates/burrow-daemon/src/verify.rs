@@ -43,7 +43,9 @@ pub fn spawn_verify_loop(state: std::sync::Weak<AppState>) {
 
 pub async fn verify_round(state: &Arc<AppState>) -> anyhow::Result<(u32, u32)> {
     // Oldest-verified placements first, grouped per device.
-    let work: Vec<(Vec<u8>, Vec<(Vec<u8>, u64)>)> = state
+    // (device_id, [(blob_hash, size), ...])
+    type Work = Vec<(Vec<u8>, Vec<(Vec<u8>, u64)>)>;
+    let work: Work = state
         .db
         .call(|conn| {
             let mut stmt = conn.prepare(
@@ -74,9 +76,17 @@ pub async fn verify_round(state: &Arc<AppState>) -> anyhow::Result<(u32, u32)> {
 
     let (mut ok, mut lost) = (0u32, 0u32);
     for (peer_bytes, blobs) in work {
-        let Ok(id_arr) = <[u8; 32]>::try_from(peer_bytes) else { continue };
-        let Ok(peer) = EndpointId::from_bytes(&id_arr) else { continue };
-        let mut conn = match state.endpoint.connect(peer, iroh_blobs::protocol::ALPN).await {
+        let Ok(id_arr) = <[u8; 32]>::try_from(peer_bytes) else {
+            continue;
+        };
+        let Ok(peer) = EndpointId::from_bytes(&id_arr) else {
+            continue;
+        };
+        let mut conn = match state
+            .endpoint
+            .connect(peer, iroh_blobs::protocol::ALPN)
+            .await
+        {
             Ok(c) => c,
             Err(_) => continue, // unreachable: liveness handles this, not us
         };
@@ -84,26 +94,42 @@ pub async fn verify_round(state: &Arc<AppState>) -> anyhow::Result<(u32, u32)> {
         let scratch = MemStore::new();
         let mut peer_reachable = true;
         for (hash_bytes, size) in blobs {
-            let Ok(hash_arr) = <[u8; 32]>::try_from(hash_bytes) else { continue };
+            let Ok(hash_arr) = <[u8; 32]>::try_from(hash_bytes) else {
+                continue;
+            };
             let hash = iroh_blobs::Hash::from_bytes(hash_arr);
             // Random 1 KiB bao chunk within the blob.
             let chunk_count = size.div_ceil(1024).max(1);
             let mut rand = [0u8; 8];
             getrandom::fill(&mut rand).expect("OS RNG unavailable");
             let idx = u64::from_le_bytes(rand) % chunk_count;
-            let request = || GetRequest::builder().root(ChunkRanges::chunk(idx)).build(hash);
-            let mut verified =
-                scratch.remote().execute_get(conn.clone(), request()).await.is_ok();
+            let request = || {
+                GetRequest::builder()
+                    .root(ChunkRanges::chunk(idx))
+                    .build(hash)
+            };
+            let mut verified = scratch
+                .remote()
+                .execute_get(conn.clone(), request())
+                .await
+                .is_ok();
             if !verified {
                 // A mid-stream hiccup is not proof of loss: retry once on a
                 // fresh connection before declaring the replica gone. If the
                 // peer became unreachable, this round proves nothing — bail
                 // without marking anything lost.
-                match state.endpoint.connect(peer, iroh_blobs::protocol::ALPN).await {
+                match state
+                    .endpoint
+                    .connect(peer, iroh_blobs::protocol::ALPN)
+                    .await
+                {
                     Ok(fresh) => {
                         conn = fresh;
-                        verified =
-                            scratch.remote().execute_get(conn.clone(), request()).await.is_ok();
+                        verified = scratch
+                            .remote()
+                            .execute_get(conn.clone(), request())
+                            .await
+                            .is_ok();
                     }
                     Err(_) => {
                         peer_reachable = false;

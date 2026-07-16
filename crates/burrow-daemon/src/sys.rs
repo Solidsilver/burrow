@@ -33,7 +33,10 @@ pub fn on_battery() -> bool {
     }
     #[cfg(target_os = "macos")]
     {
-        if let Ok(out) = std::process::Command::new("pmset").args(["-g", "batt"]).output() {
+        if let Ok(out) = std::process::Command::new("pmset")
+            .args(["-g", "batt"])
+            .output()
+        {
             let text = String::from_utf8_lossy(&out.stdout);
             return text.contains("Battery Power");
         }

@@ -69,10 +69,9 @@ impl RepoKey {
         let m = bip39::Mnemonic::parse_normalized(phrase)
             .map_err(|e| CoreError::RecoveryPhrase(e.to_string()))?;
         let entropy = m.to_entropy();
-        let bytes: [u8; 32] = entropy
-            .as_slice()
-            .try_into()
-            .map_err(|_| CoreError::RecoveryPhrase("phrase must encode 32 bytes (24 words)".into()))?;
+        let bytes: [u8; 32] = entropy.as_slice().try_into().map_err(|_| {
+            CoreError::RecoveryPhrase("phrase must encode 32 bytes (24 words)".into())
+        })?;
         Ok(Self(bytes))
     }
 
@@ -115,7 +114,11 @@ impl RepoKey {
         blob.push(BLOB_FORMAT_V1);
         blob.extend_from_slice(&plain_id.0);
         blob.extend_from_slice(&ct);
-        SealedChunk { plain_id, blob_hash: BlobHash::of(&blob), blob }
+        SealedChunk {
+            plain_id,
+            blob_hash: BlobHash::of(&blob),
+            blob,
+        }
     }
 
     /// Decrypt a sealed blob. Authenticates via the AEAD tag and verifies the

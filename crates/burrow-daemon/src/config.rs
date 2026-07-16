@@ -34,7 +34,10 @@ pub struct DeviceConfig {
 
 impl Default for DeviceConfig {
     fn default() -> Self {
-        Self { mode: DeviceMode::Host, run_on_battery: true }
+        Self {
+            mode: DeviceMode::Host,
+            run_on_battery: true,
+        }
     }
 }
 
@@ -131,8 +134,8 @@ impl Config {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading config {}", path.display()))?;
-        let config: Config = toml::from_str(&text)
-            .with_context(|| format!("parsing config {}", path.display()))?;
+        let config: Config =
+            toml::from_str(&text).with_context(|| format!("parsing config {}", path.display()))?;
         config.validate()?;
         Ok(config)
     }
@@ -140,7 +143,12 @@ impl Config {
     pub fn validate(&self) -> anyhow::Result<()> {
         let mut seen = std::collections::HashSet::new();
         for b in &self.backups {
-            if b.id.is_empty() || !b.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+            if b.id.is_empty()
+                || !b
+                    .id
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            {
                 bail!("backup id {:?} must be non-empty [a-zA-Z0-9_-]", b.id);
             }
             if !seen.insert(&b.id) {
@@ -170,9 +178,10 @@ impl Config {
     }
 
     pub fn node_name(&self) -> String {
-        self.node.name.clone().unwrap_or_else(|| {
-            gethostname::gethostname().to_string_lossy().into_owned()
-        })
+        self.node
+            .name
+            .clone()
+            .unwrap_or_else(|| gethostname::gethostname().to_string_lossy().into_owned())
     }
 
     pub fn backup(&self, id: &str) -> Option<&BackupConfig> {
@@ -184,9 +193,13 @@ impl Config {
 /// (kb/mb/gb/tb) are powers of 1000; binary (kib/mib/gib/tib) powers of 1024.
 pub fn parse_size(s: &str) -> anyhow::Result<u64> {
     let s = s.trim().to_ascii_lowercase().replace(' ', "");
-    let split = s.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(s.len());
+    let split = s
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(s.len());
     let (num, unit) = s.split_at(split);
-    let value: f64 = num.parse().with_context(|| format!("bad size number in {s:?}"))?;
+    let value: f64 = num
+        .parse()
+        .with_context(|| format!("bad size number in {s:?}"))?;
     let mult: u64 = match unit {
         "" | "b" => 1,
         "kb" => 1000,
@@ -223,12 +236,20 @@ pub fn parse_duration(s: &str) -> anyhow::Result<u64> {
 
 /// Human-readable decimal size, e.g. 1_500_000_000 -> "1.5 GB".
 pub fn fmt_size(n: u64) -> String {
-    const UNITS: [(&str, u64); 4] =
-        [("TB", 1_000_000_000_000), ("GB", 1_000_000_000), ("MB", 1_000_000), ("KB", 1_000)];
+    const UNITS: [(&str, u64); 4] = [
+        ("TB", 1_000_000_000_000),
+        ("GB", 1_000_000_000),
+        ("MB", 1_000_000),
+        ("KB", 1_000),
+    ];
     for (unit, mult) in UNITS {
         if n >= mult {
             let v = n as f64 / mult as f64;
-            return if v >= 100.0 { format!("{v:.0} {unit}") } else { format!("{v:.1} {unit}") };
+            return if v >= 100.0 {
+                format!("{v:.0} {unit}")
+            } else {
+                format!("{v:.1} {unit}")
+            };
         }
     }
     format!("{n} B")
