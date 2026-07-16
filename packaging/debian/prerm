@@ -1,0 +1,7 @@
+#!/bin/sh
+# Debian prerm for burrow. #DEBHELPER# handles stopping/disabling the unit.
+set -e
+
+#DEBHELPER#
+
+exit 0

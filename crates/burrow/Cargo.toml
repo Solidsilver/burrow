@@ -20,3 +20,73 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-uti
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 libc = "0.2"
+
+# ---------------------------------------------------------------------------
+# Debian package (cargo-deb). Source paths are relative to THIS crate dir, so
+# workspace-root files use ../../ ; the binary uses the magic target/release/
+# prefix that cargo-deb rewrites to the real target dir. Build with:
+#   cargo build --release -p burrow && cargo deb -p burrow --no-build
+# ---------------------------------------------------------------------------
+[package.metadata.deb]
+maintainer = "solidsilver <solidsilver@users.noreply.github.com>"
+copyright = "2026 solidsilver"
+license-file = ["../../LICENSE-MIT", "0"]
+section = "utils"
+priority = "optional"
+extended-description = """\
+Distributed backup among friends. You and your self-hosting friends reserve \
+slices of each other's disks; burrow keeps encrypted, deduplicated, \
+version-history backups of your folders replicated across their machines, \
+over iroh. The service is installed disabled: run `sudo burrowctl init` once \
+(it prints your recovery phrase), then `sudo systemctl enable --now burrow`."""
+assets = [
+    ["target/release/burrow", "usr/bin/", "755"],
+    ["../../packaging/burrowctl", "usr/bin/", "755"],
+    ["../../contrib/config.example.toml", "usr/share/doc/burrow/", "644"],
+    ["../../README.md", "usr/share/doc/burrow/", "644"],
+    ["../../LICENSE-MIT", "usr/share/doc/burrow/", "644"],
+    ["../../LICENSE-APACHE", "usr/share/doc/burrow/", "644"],
+]
+maintainer-scripts = "../../packaging/debian"
+systemd-units = { unit-name = "burrow", unit-scripts = "../../contrib", enable = false, start = false }
+
+# ---------------------------------------------------------------------------
+# RPM package (cargo-generate-rpm). Source paths resolve from the CWD first, so
+# run from the WORKSPACE ROOT and use plain workspace-relative paths. Build:
+#   cargo build --release -p burrow && cargo generate-rpm -p crates/burrow
+# ---------------------------------------------------------------------------
+[package.metadata.generate-rpm]
+summary = "Distributed backup among friends, over iroh"
+assets = [
+    { source = "target/release/burrow", dest = "/usr/bin/burrow", mode = "755" },
+    { source = "packaging/burrowctl", dest = "/usr/bin/burrowctl", mode = "755" },
+    { source = "contrib/burrow.service", dest = "/usr/lib/systemd/system/burrow.service", mode = "644" },
+    { source = "contrib/config.example.toml", dest = "/usr/share/doc/burrow/config.example.toml", mode = "644" },
+    { source = "README.md", dest = "/usr/share/doc/burrow/README.md", mode = "644" },
+    { source = "LICENSE-MIT", dest = "/usr/share/doc/burrow/LICENSE-MIT", mode = "644" },
+    { source = "LICENSE-APACHE", dest = "/usr/share/doc/burrow/LICENSE-APACHE", mode = "644" },
+]
+pre_install_script = """\
+getent group burrow >/dev/null 2>&1 || groupadd --system burrow
+getent passwd burrow >/dev/null 2>&1 || useradd --system --gid burrow \
+    --home-dir /var/lib/burrow --shell /sbin/nologin \
+    --comment "burrow backup daemon" burrow
+"""
+post_install_script = """\
+mkdir -p /etc/burrow /var/lib/burrow
+chown burrow:burrow /etc/burrow /var/lib/burrow
+chmod 0750 /etc/burrow
+chmod 0700 /var/lib/burrow
+if command -v systemctl >/dev/null 2>&1; then systemctl daemon-reload >/dev/null 2>&1 || true; fi
+"""
+pre_uninstall_script = """\
+if [ "$1" = 0 ] && command -v systemctl >/dev/null 2>&1; then
+    systemctl --no-reload disable --now burrow.service >/dev/null 2>&1 || true
+fi
+"""
+post_uninstall_script = """\
+if command -v systemctl >/dev/null 2>&1; then systemctl daemon-reload >/dev/null 2>&1 || true; fi
+"""
+
+[package.metadata.generate-rpm.requires]
+systemd = "*"

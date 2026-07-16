@@ -11,7 +11,7 @@
       overlay = final: prev: {
         burrow = final.rustPlatform.buildRustPackage {
           pname = "burrow";
-          version = "0.1.0";
+          version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
           src = self;
           cargoLock.lockFile = ./Cargo.lock;
           nativeBuildInputs = [ final.pkg-config ];
@@ -34,6 +34,15 @@
             burrow = pkgs.burrow;
             default = pkgs.burrow;
           };
+          apps =
+            let burrowApp = {
+              type = "app";
+              program = "${pkgs.burrow}/bin/burrow";
+            };
+            in {
+              burrow = burrowApp;
+              default = burrowApp;
+            };
           devShells.default = pkgs.mkShell {
             inputsFrom = [ pkgs.burrow ];
             packages = with pkgs; [ rust-analyzer clippy rustfmt ];

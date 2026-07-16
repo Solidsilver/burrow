@@ -1,0 +1,148 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            linux: true
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            linux: true
+          - target: x86_64-apple-darwin
+            os: macos-13
+          - target: aarch64-apple-darwin
+            os: macos-14
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # Host == target on every runner above, so no cross-compilation: a plain
+      # release build lands in target/release, which is what cargo-deb and
+      # cargo-generate-rpm expect (their magic target/release/ prefix).
+      - name: Build
+        run: cargo build --release --bin burrow
+
+      - name: Package tarball
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          target="${{ matrix.target }}"
+          staging="burrow-${version}-${target}"
+          mkdir -p "$staging/contrib"
+          cp target/release/burrow "$staging/"
+          cp README.md LICENSE-MIT LICENSE-APACHE "$staging/"
+          cp contrib/config.example.toml "$staging/"
+          cp contrib/burrow.service contrib/com.burrow.daemon.plist "$staging/contrib/"
+          tar czf "${staging}.tar.gz" "$staging"
+
+      - name: Install packaging tools
+        if: matrix.linux
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb,cargo-generate-rpm
+
+      - name: Build .deb and .rpm
+        if: matrix.linux
+        shell: bash
+        run: |
+          mkdir -p dist
+          cargo deb -p burrow --no-build
+          cargo generate-rpm -p crates/burrow
+          cp target/debian/*.deb dist/
+          cp target/generate-rpm/*.rpm dist/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: burrow-${{ matrix.target }}
+          path: |
+            burrow-*.tar.gz
+            dist/*.deb
+            dist/*.rpm
+          if-no-files-found: ignore
+
+  release:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Collect artifacts and checksums
+        shell: bash
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.deb' -o -name '*.rpm' \) \
+            -exec cp {} release/ \;
+          ( cd release && sha256sum * ) > SHA256SUMS
+          mv SHA256SUMS release/
+          ls -l release
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+
+  homebrew:
+    name: bump homebrew tap
+    needs: release
+    runs-on: ubuntu-latest
+    # Skip prereleases (tags containing a hyphen, e.g. v0.1.2-rc.1).
+    if: ${{ !contains(github.ref_name, '-') }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Render formula
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          sha() { find artifacts -name "burrow-${version}-$1.tar.gz" -exec sha256sum {} \; | awk '{print $1}'; }
+          cp packaging/homebrew/burrow.rb.tmpl burrow.rb
+          sed -i "s/@@VERSION@@/${version}/g"                       burrow.rb
+          sed -i "s/@@SHA256_DARWIN_ARM64@@/$(sha aarch64-apple-darwin)/g"      burrow.rb
+          sed -i "s/@@SHA256_DARWIN_X86_64@@/$(sha x86_64-apple-darwin)/g"      burrow.rb
+          sed -i "s/@@SHA256_LINUX_ARM64@@/$(sha aarch64-unknown-linux-gnu)/g" burrow.rb
+          sed -i "s/@@SHA256_LINUX_X86_64@@/$(sha x86_64-unknown-linux-gnu)/g" burrow.rb
+          echo "--- rendered Formula/burrow.rb ---"
+          cat burrow.rb
+      - name: Push to tap
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        shell: bash
+        run: |
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::warning::HOMEBREW_TAP_TOKEN not set — skipping tap update."
+            exit 0
+          fi
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/solidsilver/homebrew-burrow.git" tap
+          mkdir -p tap/Formula
+          cp burrow.rb tap/Formula/burrow.rb
+          cd tap
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/burrow.rb
+          git commit -m "burrow ${GITHUB_REF_NAME#v}" || { echo "no formula changes"; exit 0; }
+          git push

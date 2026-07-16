@@ -1,10 +1,18 @@
-# systemd unit for the burrow daemon (user-level or system-level).
+# systemd unit for the burrow daemon (system-wide install).
 #
-# System-level install:
-#   sudo cp burrow.service /etc/systemd/system/
+# The .deb/.rpm packages install this unit but leave it DISABLED, because
+# burrow cannot start until it has been initialised once by a human:
+#
+#   sudo burrowctl init      # generates the repo key, PRINTS your 24-word
+#                            # recovery phrase — store it OFF this machine
 #   sudo systemctl enable --now burrow
-# Adjust User= and the paths below for your setup. NixOS users: prefer the
-# flake's nixosModules.burrow instead.
+#
+# State layout (via the BURROW_* env vars below):
+#   /etc/burrow      config.toml + repo.key  (secret; dir 0750, key 0600)
+#   /var/lib/burrow  metadata DB + blob store
+#   /run/burrow      CLI control socket
+#
+# NixOS users: prefer the flake's nixosModules.burrow instead of this unit.
 
 [Unit]
 Description=burrow — distributed backup among friends
@@ -16,22 +24,49 @@ Wants=network-online.target
 Type=simple
 User=burrow
 Group=burrow
-ExecStart=/usr/local/bin/burrow daemon run
+Environment=BURROW_CONFIG_DIR=/etc/burrow
+Environment=BURROW_DATA_DIR=/var/lib/burrow
+Environment=BURROW_SOCKET=/run/burrow/daemon.sock
+ExecStart=/usr/bin/burrow daemon run
 Restart=on-failure
 RestartSec=5
+TimeoutStopSec=15
 
-# State lives in ~/.local/share/burrow and ~/.config/burrow of the service
-# user by default; override with these if you prefer /var/lib:
-#Environment=BURROW_DATA_DIR=/var/lib/burrow/data
-#Environment=BURROW_CONFIG_DIR=/etc/burrow
+# systemd-managed directories: created with the right owner on start, so no
+# maintainer script has to mkdir/chown them.
+StateDirectory=burrow
+StateDirectoryMode=0700
+ConfigDirectory=burrow
+ConfigDirectoryMode=0750
+RuntimeDirectory=burrow
+RuntimeDirectoryMode=0700
 
-# Hardening (relax ReadOnlyPaths/ReadWritePaths to match your backup sources)
+# --- Sandboxing (see `systemd-analyze security burrow`) ---
 NoNewPrivileges=true
 ProtectSystem=strict
-ProtectHome=read-only
-ReadWritePaths=%h/.local/share/burrow %h/.config/burrow
-PrivateTmp=false
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+# AF_NETLINK is required: iroh enumerates local interfaces to gather QUIC
+# connection candidates. AF_INET/AF_INET6 for QUIC, AF_UNIX for the CLI socket.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=true
+RestrictRealtime=true
 RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target

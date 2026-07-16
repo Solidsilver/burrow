@@ -1,0 +1,30 @@
+#!/bin/sh
+# Debian postinst for burrow. The #DEBHELPER# token is expanded by cargo-deb
+# with the systemd registration snippets (daemon-reload; the unit is shipped
+# DISABLED, so it is not enabled or started here).
+set -e
+
+case "$1" in
+    configure)
+        # Dedicated system user/group that owns burrow's state.
+        if ! getent group burrow >/dev/null 2>&1; then
+            addgroup --system burrow
+        fi
+        if ! getent passwd burrow >/dev/null 2>&1; then
+            adduser --system --no-create-home --home /var/lib/burrow \
+                --ingroup burrow --disabled-login \
+                --gecos "burrow backup daemon" burrow
+        fi
+        # Persistent dirs must exist before `sudo burrowctl init` is run,
+        # i.e. before the service (which manages them via StateDirectory/
+        # ConfigDirectory) is ever started.
+        mkdir -p /etc/burrow /var/lib/burrow
+        chown burrow:burrow /etc/burrow /var/lib/burrow
+        chmod 0750 /etc/burrow
+        chmod 0700 /var/lib/burrow
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

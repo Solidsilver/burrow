@@ -1,0 +1,13 @@
+#!/bin/sh
+# Debian postrm for burrow. #DEBHELPER# handles unit cleanup / daemon-reload.
+#
+# NOTE: on purge we deliberately do NOT delete the `burrow` user, /etc/burrow,
+# or /var/lib/burrow — they hold the secret repo key and friends' backup data,
+# and the repo key is required to ever decrypt your backups. Remove them by
+# hand only if you are certain:
+#   sudo rm -rf /etc/burrow /var/lib/burrow && sudo deluser --system burrow
+set -e
+
+#DEBHELPER#
+
+exit 0

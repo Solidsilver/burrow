@@ -1,0 +1,21 @@
+#!/bin/sh
+# burrowctl — run the burrow CLI against the system-wide daemon.
+#
+# The daemon's control socket is mode 0600 owned by the `burrow` service user,
+# so administrative commands must run as that user with the same environment
+# the daemon uses. This wrapper does exactly that via sudo. Examples:
+#
+#   sudo burrowctl init      # one-time setup; PRINTS your recovery phrase
+#   sudo burrowctl status
+#   sudo burrowctl peers
+#   sudo burrowctl peer invite
+#
+# It is installed by the .deb/.rpm packages alongside the `burrow` binary and
+# the systemd unit, which share these BURROW_* paths.
+set -eu
+
+exec sudo -u burrow env \
+    BURROW_CONFIG_DIR=/etc/burrow \
+    BURROW_DATA_DIR=/var/lib/burrow \
+    BURROW_SOCKET=/run/burrow/daemon.sock \
+    /usr/bin/burrow "$@"
