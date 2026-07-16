@@ -1,5 +1,6 @@
 #!/bin/sh
-# Debian prerm for burrow. #DEBHELPER# handles stopping/disabling the unit.
+# Debian prerm for burrow. cargo-deb inserts its stop/disable snippet at the
+# marker below.
 set -e
 
 #DEBHELPER#

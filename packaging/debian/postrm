@@ -1,5 +1,6 @@
 #!/bin/sh
-# Debian postrm for burrow. #DEBHELPER# handles unit cleanup / daemon-reload.
+# Debian postrm for burrow. cargo-deb inserts its unit-cleanup/daemon-reload
+# snippet at the marker below.
 #
 # NOTE: on purge we deliberately do NOT delete the `burrow` user, /etc/burrow,
 # or /var/lib/burrow — they hold the secret repo key and friends' backup data,
