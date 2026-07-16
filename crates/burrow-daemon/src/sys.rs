@@ -51,21 +51,19 @@ pub fn on_battery() -> bool {
                 let p = e.path();
                 let kind = std::fs::read_to_string(p.join("type")).unwrap_or_default();
                 match kind.trim() {
-                    "Mains" => {
+                    "Mains"
                         if std::fs::read_to_string(p.join("online"))
                             .map(|s| s.trim() == "1")
-                            .unwrap_or(false)
-                        {
-                            return false;
-                        }
+                            .unwrap_or(false) =>
+                    {
+                        return false;
                     }
-                    "Battery" => {
+                    "Battery"
                         if std::fs::read_to_string(p.join("status"))
                             .map(|s| s.trim() == "Discharging")
-                            .unwrap_or(false)
-                        {
-                            discharging = true;
-                        }
+                            .unwrap_or(false) =>
+                    {
+                        discharging = true;
                     }
                     _ => {}
                 }
