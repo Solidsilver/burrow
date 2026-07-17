@@ -178,8 +178,9 @@ Docker: publish the port and enable in your mounted config, e.g.
 the config volume (`docker exec burrow burrow web token`).
 
 The UI is a Svelte SPA embedded in the binary; released binaries, Docker
-images, and the `prebuilt` image target ship it prebuilt. From a source
-checkout, `cargo build` embeds a placeholder page until you build the
+images, the `prebuilt` image target, and the nix flake package ship it
+prebuilt. From a source checkout, `cargo build` embeds a placeholder page
+until you build the
 frontend: `cd web && npm install && npm run build` (vite dev server: `npm run
 dev` proxies the API to a locally-running daemon). Lean builds drop the whole
 feature: `cargo build --no-default-features`. The JSON API lives under
