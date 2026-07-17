@@ -21,10 +21,15 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 libc = "0.2"
 
+[features]
+default = ["web"]
+web = ["burrow-daemon/web"]
+
 # ---------------------------------------------------------------------------
 # Debian package (cargo-deb). Source paths are relative to THIS crate dir, so
 # workspace-root files use ../../ ; the binary uses the magic target/release/
 # prefix that cargo-deb rewrites to the real target dir. Build with:
+#   (cd web && npm ci && npm run build)   # embed the real web UI, not the placeholder
 #   cargo build --release -p burrow && cargo deb -p burrow --no-build
 # ---------------------------------------------------------------------------
 [package.metadata.deb]
@@ -53,6 +58,7 @@ systemd-units = { unit-name = "burrow", unit-scripts = "../../contrib", enable =
 # ---------------------------------------------------------------------------
 # RPM package (cargo-generate-rpm). Source paths resolve from the CWD first, so
 # run from the WORKSPACE ROOT and use plain workspace-relative paths. Build:
+#   (cd web && npm ci && npm run build)   # embed the real web UI, not the placeholder
 #   cargo build --release -p burrow && cargo generate-rpm -p crates/burrow
 # ---------------------------------------------------------------------------
 [package.metadata.generate-rpm]

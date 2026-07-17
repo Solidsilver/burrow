@@ -25,6 +25,45 @@ fn now_unix() -> u64 {
 /// or flooding the placements table by claiming endless pages.
 const MAX_RESYNC_PAGES_PER_PEER: u64 = 10_000;
 
+/// Suspend scheduled backups + replication (until resumed, or for `seconds`).
+/// Shared by the control socket and the web API.
+pub async fn pause(state: &Arc<AppState>, seconds: Option<u64>) -> anyhow::Result<String> {
+    let until = match seconds {
+        Some(s) => now_unix() + s,
+        None => u64::MAX,
+    };
+    *state.paused_until.lock().expect("pause lock poisoned") = Some(until);
+    // Persist so a daemon restart doesn't silently resume.
+    state
+        .db
+        .call(move |conn| {
+            conn.execute(
+                "INSERT INTO kv (key, value) VALUES ('paused_until', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [until.to_string()],
+            )?;
+            Ok(())
+        })
+        .await?;
+    Ok(match seconds {
+        Some(s) => format!("paused scheduled backups and replication for {s}s"),
+        None => "paused until `burrow resume`".to_string(),
+    })
+}
+
+/// Resume after `pause`. Shared by the control socket and the web API.
+pub async fn resume(state: &Arc<AppState>) -> anyhow::Result<String> {
+    *state.paused_until.lock().expect("pause lock poisoned") = None;
+    state
+        .db
+        .call(|conn| {
+            conn.execute("DELETE FROM kv WHERE key = 'paused_until'", [])?;
+            Ok(())
+        })
+        .await?;
+    Ok("resumed".to_string())
+}
+
 pub async fn status(state: &Arc<AppState>) -> anyhow::Result<StatusInfo> {
     let mut backups = Vec::new();
     for b in &state.config.backups {

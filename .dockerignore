@@ -2,6 +2,7 @@
 .git/
 .github/
 target/
+web/node_modules/
 
 # The staged release binary (`./burrow`, used by the `prebuilt` target) is
 # intentionally NOT ignored.

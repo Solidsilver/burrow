@@ -36,6 +36,18 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      # Build the web UI first: the release binary embeds web-dist/ via
+      # rust-embed (missing assets degrade to a placeholder page, so ordering
+      # matters for the published artifacts).
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build web UI
+        run: npm ci && npm run build
+        working-directory: web
+
       # Host == target on every runner above, so no cross-compilation: a plain
       # release build lands in target/release, which is what cargo-deb and
       # cargo-generate-rpm expect (their magic target/release/ prefix).

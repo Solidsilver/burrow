@@ -27,6 +27,18 @@ evac_window = "14d"
 # How often to cryptographically spot-check that peers really hold your data.
 verify_interval = "1h"
 
+# [web]
+# # Optional web UI + JSON API. Purely additive: the daemon runs exactly the
+# # same with it off, and `cargo build --no-default-features` compiles it out.
+# enable = true
+# # Loopback (default) needs no token. Binding beyond loopback requires the
+# # auto-generated token in ~/.config/burrow/web.token (`burrow web token`).
+# bind = "127.0.0.1:8385"
+# # Loopback trust is by client IP: if the UI sits behind a same-host reverse
+# # proxy, every remote client looks like 127.0.0.1 — set this false so all
+# # clients need the token.
+# trust_loopback = true
+
 # One [[backup]] block per thing you back up.
 [[backup]]
 id = "photos"

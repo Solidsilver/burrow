@@ -94,6 +94,11 @@ enum Command {
     Recover,
     /// Rebuild the snapshot catalog from what peers hold (after `recover`)
     Resync,
+    /// Web UI operations
+    Web {
+        #[command(subcommand)]
+        command: WebCommand,
+    },
     /// Diagnose config, daemon, connectivity, and peer reachability
     Doctor,
 }
@@ -135,6 +140,14 @@ enum DeviceCommand {
 enum DaemonCommand {
     /// Run the daemon in the foreground (systemd/launchd entry point)
     Run,
+}
+
+#[derive(Subcommand)]
+enum WebCommand {
+    /// Print the access token for the optional web UI. Only needed when it is
+    /// bound beyond loopback ([web] enable = true, bind = "0.0.0.0:8385" …);
+    /// loopback browsers are trusted without it.
+    Token,
 }
 
 #[derive(Subcommand)]
@@ -318,6 +331,17 @@ async fn main() -> anyhow::Result<()> {
         Command::Resume => done(call(CtrlRequest::Resume).await?),
         Command::Resync => done(call(CtrlRequest::Resync).await?),
         Command::Recover => recover(),
+        Command::Web {
+            command: WebCommand::Token,
+        } => {
+            let token =
+                burrow_daemon::token::load_or_create(&burrow_daemon::paths::web_token_file())?;
+            println!("{token}");
+            println!(
+                "(needed only from non-loopback browsers; enable the UI with [web] enable = true)"
+            );
+            Ok(())
+        }
         Command::Doctor => doctor().await,
     }
 }

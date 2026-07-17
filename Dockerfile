@@ -20,9 +20,21 @@
 # stage below, so there is nothing to keep in sync by hand.
 
 # ---- build from source ------------------------------------------------------
+# Web UI assets: built with node first so the rust build embeds the real SPA
+# (vite's outDir lands at /src/crates/burrow-daemon/web-dist, which rust-embed
+# picks up at compile time). Without this stage the daemon still compiles —
+# build.rs falls back to a placeholder page.
+FROM node:22-bookworm-slim AS webbuilder
+WORKDIR /src/web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web/ ./
+RUN npm run build
+
 FROM rust:1-bookworm AS builder
 WORKDIR /src
 COPY . .
+COPY --from=webbuilder /src/crates/burrow-daemon/web-dist crates/burrow-daemon/web-dist
 # The release profile already sets thin LTO + strip (see Cargo.toml). rusqlite
 # is compiled bundled and blake3 builds C/SIMD, but the rust image ships a C
 # compiler, so no extra apt packages are required.

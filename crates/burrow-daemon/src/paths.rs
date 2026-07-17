@@ -52,6 +52,12 @@ pub fn join_ticket_file() -> PathBuf {
     config_dir().join("join.ticket")
 }
 
+/// Bearer token for the optional web UI when bound beyond loopback. State,
+/// not config: auto-generated on first start with `[web] enable = true`.
+pub fn web_token_file() -> PathBuf {
+    config_dir().join("web.token")
+}
+
 /// Unix sockets are limited to ~104 bytes of path (SUN_LEN), so the socket
 /// can't live under an arbitrarily deep data dir. It goes in a short runtime
 /// dir instead, named by a hash of the data dir so distinct daemons never

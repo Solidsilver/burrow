@@ -53,6 +53,15 @@ impl AppState {
             }
         }
     }
+
+    /// The active pause deadline (u64::MAX = until resumed), None if running.
+    pub fn paused_until(&self) -> Option<u64> {
+        if self.is_paused() {
+            *self.paused_until.lock().expect("pause lock poisoned")
+        } else {
+            None
+        }
+    }
 }
 
 /// Run the daemon until ctrl-c / SIGTERM.
@@ -266,6 +275,31 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     crate::verify::spawn_verify_loop(Arc::downgrade(&state));
     crate::scheduler::spawn_scheduler(Arc::downgrade(&state));
 
+    // Optional web UI / JSON API. Purely additive: failures never stop the
+    // daemon, and `--no-default-features` compiles it out entirely.
+    let mut web_handle = None;
+    if state.config.web.enable {
+        #[cfg(feature = "web")]
+        match crate::web::start(state.clone()).await {
+            Ok((addr, handle)) => {
+                web_handle = Some(handle);
+                if addr.ip().is_loopback() {
+                    tracing::info!(url = %format!("http://{addr}"), "web UI listening (loopback, no token needed)");
+                } else {
+                    tracing::info!(
+                        url = %format!("http://{addr}"),
+                        "web UI listening — non-loopback clients need the token (`burrow web token`)"
+                    );
+                }
+            }
+            Err(e) => tracing::error!("web UI failed to start (daemon unaffected): {e:#}"),
+        }
+        #[cfg(not(feature = "web"))]
+        tracing::warn!(
+            "[web] enable = true but this build has no web support (compiled with --no-default-features)"
+        );
+    }
+
     // Consume a pending join/pair ticket left by `burrow device join` or
     // `burrow peer add` on a machine whose daemon wasn't running yet.
     {
@@ -297,6 +331,9 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     // would delete *their* socket.
     let _ = std::fs::remove_file(&socket);
     ctrl.abort();
+    if let Some(h) = web_handle {
+        h.abort();
+    }
     let _ = tokio::time::timeout(std::time::Duration::from_secs(2), router.shutdown()).await;
     state.fs_store.shutdown().await.ok();
     Ok(())

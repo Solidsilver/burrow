@@ -18,6 +18,8 @@ pub struct Config {
     pub storage: StorageConfig,
     #[serde(default)]
     pub repair: RepairConfig,
+    #[serde(default)]
+    pub web: WebConfig,
     #[serde(default, rename = "backup")]
     pub backups: Vec<BackupConfig>,
 }
@@ -87,6 +89,32 @@ impl RepairConfig {
     }
     pub fn verify_interval_secs(&self) -> u64 {
         parse_duration(&self.verify_interval).expect("validated at load")
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct WebConfig {
+    /// Serve the optional web UI + JSON API. Off by default; the core daemon
+    /// never depends on it.
+    pub enable: bool,
+    /// Address to bind, e.g. "127.0.0.1:8385". Loopback clients need no
+    /// token; any other bind requires the token in web.token (auto-generated
+    /// on first start, printed by `burrow web token`).
+    pub bind: String,
+    /// Trust loopback clients without a token (same model as the control
+    /// socket). Set false when the UI sits behind a reverse proxy: a
+    /// same-host proxy makes every remote client look like 127.0.0.1.
+    pub trust_loopback: bool,
+}
+
+impl Default for WebConfig {
+    fn default() -> Self {
+        Self {
+            enable: false,
+            bind: "127.0.0.1:8385".into(),
+            trust_loopback: true,
+        }
     }
 }
 
@@ -161,6 +189,15 @@ impl Config {
         if let Some(max) = &self.storage.offer_max {
             parse_size(max).with_context(|| format!("storage.offer_max {max:?}"))?;
         }
+        self.web
+            .bind
+            .parse::<std::net::SocketAddr>()
+            .with_context(|| {
+                format!(
+                    "web.bind {:?} (want addr:port, e.g. 127.0.0.1:8385)",
+                    self.web.bind
+                )
+            })?;
         for (label, value) in [
             ("repair.grace_period", &self.repair.grace_period),
             ("repair.evac_window", &self.repair.evac_window),
