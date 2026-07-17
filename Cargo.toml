@@ -16,7 +16,11 @@ repository = "https://github.com/solidsilver/burrow"
 [workspace.dependencies]
 burrow-core = { path = "crates/burrow-core" }
 burrow-proto = { path = "crates/burrow-proto" }
-burrow-daemon = { path = "crates/burrow-daemon" }
+# default-features = false: the `web` feature must come from the depending
+# crate (burrow's `default = ["web"]`); without this, the dependency edge
+# always activates burrow-daemon's own default features and a
+# `--no-default-features` build silently keeps the web UI.
+burrow-daemon = { path = "crates/burrow-daemon", default-features = false }
 
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["alloc"] }

@@ -277,7 +277,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
 
     // Optional web UI / JSON API. Purely additive: failures never stop the
     // daemon, and `--no-default-features` compiles it out entirely.
-    let mut web_handle = None;
+    let mut web_handle: Option<tokio::task::JoinHandle<()>> = None;
     if state.config.web.enable {
         #[cfg(feature = "web")]
         match crate::web::start(state.clone()).await {
