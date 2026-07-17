@@ -3,3 +3,7 @@
 .DS_Store
 result
 result-*
+
+# Web UI: build output (embedded by burrow-daemon at compile time)
+/crates/burrow-daemon/web-dist/
+/web/node_modules/

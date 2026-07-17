@@ -27,5 +27,15 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 blake3.workspace = true
 libc = "0.2"
 
+# Optional web UI / JSON API (feature "web", on by default — disable with
+# `--no-default-features` for a lean build).
+axum = { version = "0.8", optional = true }
+serde_json = { version = "1", optional = true }
+rust-embed = { version = "8", optional = true }
+
+[features]
+default = ["web"]
+web = ["dep:axum", "dep:serde_json", "dep:rust-embed"]
+
 [dev-dependencies]
 tempfile = "3"

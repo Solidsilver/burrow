@@ -149,6 +149,42 @@ $ burrow restore photos --target ~/photos
 **Write the phrase down. Store it off-machine.** Without it your backups are
 noise; with it anyone can read them.
 
+## Web UI
+
+An optional web UI mirrors everything the CLI can do — overview, backups and
+restores, friends and space requests, devices, storage. It's off by default
+and purely additive: the daemon runs identically without it.
+
+```toml
+# ~/.config/burrow/config.toml
+[web]
+enable = true
+bind = "127.0.0.1:8385"   # default
+```
+
+Restart the daemon and open http://127.0.0.1:8385. Loopback browsers are
+trusted (same model as the control socket). To reach it from another machine
+(LAN, Tailscale), bind e.g. `0.0.0.0:8385` — non-loopback clients must send
+the auto-generated token (`burrow web token` prints it; stored `0600` in
+`~/.config/burrow/web.token`).
+
+**Reverse-proxy warning**: loopback trust is based on the client IP. If you
+put the UI behind a same-host reverse proxy (nginx, Caddy), every remote
+client arrives as `127.0.0.1` and would be trusted — set
+`trust_loopback = false` under `[web]` so all clients need the token.
+
+Docker: publish the port and enable in your mounted config, e.g.
+`docker run -p 8385:8385 …` with `bind = "0.0.0.0:8385"`; the token lives in
+the config volume (`docker exec burrow burrow web token`).
+
+The UI is a Svelte SPA embedded in the binary; released binaries, Docker
+images, and the `prebuilt` image target ship it prebuilt. From a source
+checkout, `cargo build` embeds a placeholder page until you build the
+frontend: `cd web && npm install && npm run build` (vite dev server: `npm run
+dev` proxies the API to a locally-running daemon). Lean builds drop the whole
+feature: `cargo build --no-default-features`. The JSON API lives under
+`/api/v1/` and works regardless of which page is served.
+
 ## Commands
 
 | | |
@@ -165,6 +201,7 @@ noise; with it anyone can read them.
 | `burrow backup run <id>`, `snapshots` | snapshot now / list history |
 | `burrow restore <id> [--snapshot ts] --target <dir>` | get data back |
 | `burrow repair` / `resync` | force verify+re-replicate / rebuild catalog |
+| `burrow web token` | print the web UI access token |
 | `burrow key phrase` | reprint the recovery phrase |
 
 ## NixOS
