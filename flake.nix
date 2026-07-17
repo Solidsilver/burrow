@@ -17,7 +17,7 @@
           pname = "burrow-web";
           version = (builtins.fromJSON (builtins.readFile ./web/package.json)).version;
           src = ./web;
-          npmDepsHash = "sha256-SL4RJbgloIV7yqFNZ+xq9heatXbzygdZonCOakVeI9s=";
+          npmDepsHash = "sha256-Q7B+J3fqZTT3MYzow4/Fn8K5GX7gMezYuABNFyYnogM=";
           # vite.config.ts targets ../crates/burrow-daemon/web-dist for cargo
           # workflows; in the sandbox we redirect to a local dist/ instead.
           buildPhase = ''
