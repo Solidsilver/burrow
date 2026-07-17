@@ -72,7 +72,7 @@ jobs:
           cp target/generate-rpm/*.rpm dist/
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: burrow-${{ matrix.target }}
           path: |
@@ -87,30 +87,34 @@ jobs:
       # tarball/.deb/.rpm and there is no second compile. Each arch is built
       # natively on its own runner (no QEMU) and pushed by digest; the
       # docker-image job below stitches the digests into one multi-arch tag.
-      - name: Stage the binary for the prebuilt image
+      - name: Stage the binary and image name
         if: matrix.platform
         shell: bash
-        run: cp target/release/burrow burrow
+        run: |
+          cp target/release/burrow burrow
+          # GHCR references must be lowercase, but ${{ github.repository }}
+          # keeps the owner's original case (Solidsilver) — lowercase it here.
+          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
       - name: Log in to GHCR
         if: matrix.platform
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Set up Buildx
         if: matrix.platform
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
       - name: Build and push image by digest
         if: matrix.platform
         id: image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           target: prebuilt
           platforms: ${{ matrix.platform }}
           provenance: false
-          outputs: type=image,name=ghcr.io/${{ github.repository }},push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
       - name: Export digest
         if: matrix.platform
         shell: bash
@@ -121,7 +125,7 @@ jobs:
           IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
       - name: Upload image digest
         if: matrix.platform
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: digest-${{ matrix.target }}
           path: /tmp/digests/*
@@ -133,7 +137,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
       - name: Collect artifacts and checksums
@@ -160,7 +164,7 @@ jobs:
     if: ${{ !contains(github.ref_name, '-') }}
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
       - name: Render formula
@@ -202,17 +206,17 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: digests
           pattern: digest-*
           merge-multiple: true
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
       - name: Create and push manifest list
         shell: bash
         run: |
