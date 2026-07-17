@@ -180,10 +180,11 @@ the config volume (`docker exec burrow burrow web token`).
 The UI is a Svelte SPA embedded in the binary; released binaries, Docker
 images, the `prebuilt` image target, and the nix flake package ship it
 prebuilt. From a source checkout, `cargo build` embeds a placeholder page
-until you build the
-frontend: `cd web && npm install && npm run build` (vite dev server: `npm run
-dev` proxies the API to a locally-running daemon). Lean builds drop the whole
-feature: `cargo build --no-default-features`. The JSON API lives under
+until you build the frontend: `cd web && npm install && npm run build` (vite
+dev server: `npm run dev` proxies the API to a locally-running daemon). Lean
+builds drop the whole feature (`cargo build --no-default-features`): no HTTP
+API and no embedded UI — about 1.8 MB smaller and ~66 fewer crates; a lean
+daemon warns if `[web] enable = true` is set. The JSON API lives under
 `/api/v1/` and works regardless of which page is served.
 
 ## Commands
