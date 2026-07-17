@@ -197,6 +197,41 @@ The repo key is *state*, not config: run `burrow init` once as the service
 user and stash the phrase. systemd (`contrib/burrow.service`) and launchd
 (`contrib/com.burrow.daemon.plist`) units are provided for everyone else.
 
+## Docker
+
+Multi-arch images (`amd64` + `arm64`) are published to the GitHub Container
+Registry on every release. `burrow` is the image entrypoint, and it keeps its
+secret repo key and your friends' data on disk, so mount two volumes and run
+`burrow init` once before starting the daemon:
+
+```console
+# one-time: writes the repo key and prints your RECOVERY PHRASE
+# (store it OFF this machine — it is the only thing that decrypts your backups)
+$ docker run --rm -it \
+    -v burrow-config:/etc/burrow -v burrow-data:/var/lib/burrow \
+    ghcr.io/solidsilver/burrow init
+
+# run the daemon
+$ docker run -d --name burrow --restart unless-stopped \
+    -v burrow-config:/etc/burrow -v burrow-data:/var/lib/burrow \
+    ghcr.io/solidsilver/burrow
+
+# any CLI command runs against the same env
+$ docker exec burrow burrow peer invite
+$ docker exec burrow burrow status
+```
+
+No inbound ports are needed — iroh hole-punches outbound with relay fallback.
+On a Linux server, add `--network host` for the best direct-connection rate
+(it lets iroh enumerate the real interfaces; the flag is a no-op on Docker
+Desktop for Mac/Windows). The image runs as a non-root user (uid 10001): named
+volumes inherit the right ownership automatically, but a *bind* mount must be
+`chown`ed to `10001:10001` first. Blobs can go on a separate pool via
+`BURROW_BLOBS_DIR` and a third volume.
+
+Build it yourself with `docker build -t burrow .` (compiles from source); the
+published images are built with `--target prebuilt` from the release binary.
+
 ## Security model
 
 - Peers are Ed25519 keys (iroh endpoint IDs); every connection is mutually

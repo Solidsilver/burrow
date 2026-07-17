@@ -1,0 +1,7 @@
+# Keep the build context small and reproducible.
+.git/
+.github/
+target/
+
+# The staged release binary (`./burrow`, used by the `prebuilt` target) is
+# intentionally NOT ignored.
