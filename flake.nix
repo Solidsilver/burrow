@@ -9,12 +9,39 @@
   outputs = { self, nixpkgs, flake-utils }:
     let
       overlay = final: prev: {
+        # The Svelte SPA, built with npm. Output lands in the store and is
+        # copied into crates/burrow-daemon/web-dist before the Rust build so
+        # rust-embed picks it up (build.rs only writes the placeholder page
+        # when web-dist is empty).
+        burrow-web = final.buildNpmPackage {
+          pname = "burrow-web";
+          version = (builtins.fromJSON (builtins.readFile ./web/package.json)).version;
+          src = ./web;
+          npmDepsHash = "sha256-SL4RJbgloIV7yqFNZ+xq9heatXbzygdZonCOakVeI9s=";
+          # vite.config.ts targets ../crates/burrow-daemon/web-dist for cargo
+          # workflows; in the sandbox we redirect to a local dist/ instead.
+          buildPhase = ''
+            runHook preBuild
+            npm run build -- --outDir dist
+            runHook postBuild
+          '';
+          installPhase = ''
+            runHook preInstall
+            cp -r dist $out
+            runHook postInstall
+          '';
+        };
         burrow = final.rustPlatform.buildRustPackage {
           pname = "burrow";
           version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
           src = self;
           cargoLock.lockFile = ./Cargo.lock;
           nativeBuildInputs = [ final.pkg-config ];
+          preBuild = ''
+            mkdir -p crates/burrow-daemon/web-dist
+            cp -r ${final.burrow-web}/* crates/burrow-daemon/web-dist/
+            chmod -R u+w crates/burrow-daemon/web-dist
+          '';
           # rusqlite is bundled; iroh needs no system libs on Linux/macOS.
           doCheck = true;
           meta = with final.lib; {
@@ -32,6 +59,7 @@
         in {
           packages = {
             burrow = pkgs.burrow;
+            burrow-web = pkgs.burrow-web;
             default = pkgs.burrow;
           };
           apps =
@@ -45,7 +73,7 @@
             };
           devShells.default = pkgs.mkShell {
             inputsFrom = [ pkgs.burrow ];
-            packages = with pkgs; [ rust-analyzer clippy rustfmt ];
+            packages = with pkgs; [ rust-analyzer clippy rustfmt nodejs ];
           };
         })
     // {
