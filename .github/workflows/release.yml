@@ -86,11 +86,14 @@ jobs:
           cp contrib/burrow.service contrib/com.burrow.daemon.plist "$staging/contrib/"
           tar czf "${staging}.tar.gz" "$staging"
 
+      # Install from source, NOT taiki-e/install-action: the prebuilt
+      # cargo-deb x86_64 binary is itself linked against glibc 2.39 and
+      # cannot run on the 22.04 runner ("GLIBC_2.39 not found") — the same
+      # trap as the one this workflow was fixed to avoid. Compiling here
+      # takes a few minutes but always matches the runner's glibc.
       - name: Install packaging tools
         if: matrix.linux
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-deb,cargo-generate-rpm
+        run: cargo install --locked cargo-deb cargo-generate-rpm
 
       - name: Build .deb and .rpm
         if: matrix.linux
