@@ -10,9 +10,9 @@ connections are end-to-end encrypted QUIC that hole-punches through NAT (with
 public relay fallback), and blobs are content-addressed and BLAKE3-verified in
 transit.
 
-> **Built with AI assistance.** Burrow was developed with help from Anthropic's
-> Claude models (via Claude Code). All code is human-reviewed and maintained by
-> the author.
+> **Built with AI assistance.** Burrow was developed with help from Claude
+> Opus 4.8, Claude Fable 5, and Kimi K3. All code is human-reviewed and
+> maintained by the author.
 
 ```
 you                          anna's NAS                     ben's homelab
