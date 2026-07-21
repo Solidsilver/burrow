@@ -309,12 +309,13 @@ or existing claims. No inbound ports needed, no root anywhere (uid 10001 +
 
 ```console
 # one-time: generate your identity, stash the phrase OFF the cluster
-$ docker run --rm ghcr.io/solidsilver/burrow:0.2.2 init
+$ docker run --rm ghcr.io/solidsilver/burrow:0.2.3 init
 
 $ kubectl create namespace burrow
 $ kubectl -n burrow create secret generic burrow-identity \
     --from-literal=recovery-phrase='word1 word2 ... word24'
-$ helm install burrow ./charts/burrow -n burrow \
+$ helm install burrow oci://ghcr.io/solidsilver/charts/burrow \
+    --version 0.2.3 -n burrow \
     --set burrow.existingSecret=burrow-identity
 
 $ kubectl -n burrow exec burrow-0 -- burrow status

@@ -23,7 +23,7 @@ No root anywhere: the pod runs as uid/gid 10001 with `fsGroup`, a
 - A burrow identity (24-word recovery phrase). Generate one on any machine:
 
   ```console
-  $ docker run --rm ghcr.io/solidsilver/burrow:0.2.2 init
+  $ docker run --rm ghcr.io/solidsilver/burrow:0.2.3 init
   ```
 
   Write the phrase down offline — it is the only thing that decrypts your
@@ -31,20 +31,28 @@ No root anywhere: the pod runs as uid/gid 10001 with `fsGroup`, a
 
 ## Install
 
+Every release publishes the chart to GHCR as an OCI artifact (chart version
+== app version):
+
 ```console
 # 1. Put the phrase in a Secret (or use SOPS / Sealed Secrets / ESO)
 $ kubectl create namespace burrow
 $ kubectl -n burrow create secret generic burrow-identity \
     --from-literal=recovery-phrase='word1 word2 ... word24'
 
-# 2. Install from a source checkout
-$ helm install burrow ./charts/burrow -n burrow \
+# 2. Install
+$ helm install burrow oci://ghcr.io/solidsilver/charts/burrow \
+    --version 0.2.3 -n burrow \
     --set burrow.existingSecret=burrow-identity
 
 # 3. Watch first boot (init container recovers the identity)
 $ kubectl -n burrow logs burrow-0 -c bootstrap
 $ kubectl -n burrow exec burrow-0 -- burrow status
 ```
+
+(Installing from a source checkout works too: `helm install burrow
+./charts/burrow ...` — note the in-repo Chart.yaml version/appVersion is
+re-stamped from the git tag when the release workflow packages the chart.)
 
 Alternative: `--set burrow.recoveryPhrase='word1 ...'` lets the chart create
 the Secret — convenient for a test run, but the phrase then sits in your

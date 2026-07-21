@@ -30,7 +30,7 @@ services:
   burrow:
     image: ghcr.io/solidsilver/burrow:latest
     # Pin to a release instead of tracking latest:
-    # image: ghcr.io/solidsilver/burrow:0.2.2
+    # image: ghcr.io/solidsilver/burrow:0.2.3
     container_name: burrow
     restart: unless-stopped
 

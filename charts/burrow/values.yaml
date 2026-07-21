@@ -43,7 +43,7 @@ burrow:
   #
   # Generate a fresh identity (and phrase) on any machine first:
   #
-  #   docker run --rm ghcr.io/solidsilver/burrow:0.2.2 init
+  #   docker run --rm ghcr.io/solidsilver/burrow:0.2.3 init
   #
   existingSecret: ""
   # Key inside the Secret that holds the phrase.

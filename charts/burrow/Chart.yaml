@@ -5,10 +5,12 @@ description: >-
   single-replica StatefulSet with the recovery phrase held in a Kubernetes
   Secret and configuration in a ConfigMap.
 type: application
-# Chart version: bump on every chart change.
-version: 0.1.0
+# Chart version: kept in lockstep with the app — the release workflow
+# re-stamps both `version` and `appVersion` from the git tag when packaging
+# (these values are what source-checkpoint installs fall back to).
+version: 0.2.3
 # burrow release deployed by default (image tag).
-appVersion: "0.2.2"
+appVersion: "0.2.3"
 home: https://github.com/solidsilver/burrow
 sources:
   - https://github.com/solidsilver/burrow
