@@ -18,12 +18,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Linux builds are pinned to ubuntu-22.04 (glibc 2.35), NOT latest:
+          # the binaries are copied unchanged into the debian:bookworm-slim
+          # runtime image (glibc 2.36) and installed on users' distros, so
+          # they must link against the oldest glibc we support. Building on
+          # 24.04 linked GLIBC_2.39 symbols and the binary would not start on
+          # bookworm ("version `GLIBC_2.39' not found"). The smoke test below
+          # guards this.
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-22.04
             linux: true
             platform: linux/amd64
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-24.04-arm
+            os: ubuntu-22.04-arm
             linux: true
             platform: linux/arm64
           - target: aarch64-apple-darwin
@@ -53,6 +60,18 @@ jobs:
       # cargo-generate-rpm expect (their magic target/release/ prefix).
       - name: Build
         run: cargo build --release --bin burrow
+
+      # The prebuilt Docker target copies this exact binary into
+      # debian:bookworm-slim (glibc 2.36), and tarballs/.debs land on arbitrary
+      # distros — prove it actually starts on the runtime image's glibc before
+      # anything is packaged or pushed. Fails the release if a runner/image
+      # bump ever links a newer glibc again.
+      - name: Smoke test on bookworm-slim (runtime image glibc)
+        if: matrix.linux
+        shell: bash
+        run: |
+          docker run --rm -v "$PWD/target/release:/out:ro" debian:bookworm-slim \
+            /out/burrow --version
 
       - name: Package tarball
         shell: bash

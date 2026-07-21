@@ -11,7 +11,9 @@
 #   * prebuilt           — release/CI target. Copies an already-compiled binary
 #                          from the build context so the published image ships
 #                          the exact same binary as the tarball/.deb/.rpm.
-#                          Build it with:
+#                          The binary must be linked against glibc <= 2.36
+#                          (the runtime stage is bookworm-slim); CI builds it
+#                          on ubuntu-22.04 for exactly that reason. Build it with:
 #                            cp target/release/burrow ./burrow
 #                            docker build --target prebuilt -t burrow .
 #
