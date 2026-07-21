@@ -12,7 +12,7 @@ postcard.workspace = true
 thiserror.workspace = true
 blake3.workspace = true
 fastcdc = "4"
-chacha20poly1305 = "0.10"
+chacha20poly1305 = "0.11"
 zeroize = { version = "1", features = ["derive"] }
 bip39 = "2"
 getrandom = "0.4"
