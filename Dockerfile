@@ -29,7 +29,7 @@
 # Base images are digest-pinned (supply-chain: a mutable tag can be
 # re-pointed at a poisoned image). Dependabot's docker ecosystem files PRs
 # that bump the digests as the tags move.
-FROM node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3 AS webbuilder
+FROM node:26-bookworm-slim@sha256:2d49d876e96237d76de412761cf05dbfe5aee325cc4406a4d41d5824c5bb8beb AS webbuilder
 WORKDIR /src/web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
