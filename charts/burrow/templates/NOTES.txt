@@ -1,0 +1,44 @@
+{{- $full := include "burrow.fullname" . }}
+burrow is installed as a single-replica StatefulSet. NEVER scale it up:
+one repo key = one node identity.
+
+{{- if .Values.burrow.existingSecret }}
+
+The pod stays Pending until the identity Secret exists. If you haven't yet:
+
+  kubectl create secret generic {{ .Values.burrow.existingSecret }} \
+    --from-literal={{ .Values.burrow.existingSecretKey }}='word1 word2 ... word24'
+
+(New identity? Generate a phrase on any machine:
+ docker run --rm {{ include "burrow.image" . }} init)
+{{- end }}
+
+1. Watch first boot — the init container derives your repo key from the
+   recovery phrase (only while no key exists on the config volume):
+
+     kubectl logs {{ $full }}-0 -c bootstrap
+     kubectl wait --for=condition=ready pod/{{ $full }}-0 --timeout=180s
+
+2. Talk to the daemon (any burrow CLI command works):
+
+     kubectl exec {{ $full }}-0 -- burrow status
+     kubectl exec {{ $full }}-0 -- burrow peer invite        # send the ticket to a friend
+     kubectl exec {{ $full }}-0 -- burrow grant <friend> 200gb
+     kubectl exec {{ $full }}-0 -- burrow backup run <id>
+
+{{- if .Values.web.service.enabled }}
+3. Web UI:
+
+     kubectl exec {{ $full }}-0 -- burrow web token          # bearer token
+     kubectl port-forward svc/{{ $full }} {{ .Values.web.service.port }}:{{ .Values.web.service.port }}
+{{- if .Values.web.ingress.enabled }}
+
+   Ingress is enabled — remember: every host you browse by must be listed in
+   [web] allowed_hosts in the config, or burrow rejects the request.
+{{- end }}
+{{- end }}
+
+Your recovery phrase is the ONLY thing that decrypts your backups. The
+Secret in the cluster can be lost with the cluster — keep an offline copy
+somewhere safe. Config changes (values `config`) roll the pod automatically;
+PVCs are kept on uninstall (helm never deletes StatefulSet volumes).

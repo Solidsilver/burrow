@@ -1,0 +1,20 @@
+apiVersion: v2
+name: burrow
+description: >-
+  Distributed backup among friends, over iroh. Runs the burrow daemon as a
+  single-replica StatefulSet with the recovery phrase held in a Kubernetes
+  Secret and configuration in a ConfigMap.
+type: application
+# Chart version: bump on every chart change.
+version: 0.1.0
+# burrow release deployed by default (image tag).
+appVersion: "0.2.2"
+home: https://github.com/solidsilver/burrow
+sources:
+  - https://github.com/solidsilver/burrow
+keywords:
+  - backup
+  - p2p
+  - iroh
+  - selfhosted
+license: MIT OR Apache-2.0

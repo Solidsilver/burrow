@@ -1,0 +1,19 @@
+# Governing headless Service — required by the StatefulSet for a stable pod
+# network identity (<pod>.<release>-headless). burrow's real identity is
+# cryptographic (derived from the repo key), so this carries no traffic.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "burrow.fullname" . }}-headless
+  labels:
+    {{- include "burrow.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  selector:
+    {{- include "burrow.selectorLabels" . | nindent 4 }}
+  {{- if .Values.web.service.enabled }}
+  ports:
+    - name: web
+      port: 8385
+      targetPort: web
+  {{- end }}

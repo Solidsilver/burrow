@@ -297,6 +297,34 @@ Prefer Compose? A self-documenting `compose.yaml` with the optional bits
 commented out ships in the repo root: `docker compose run --rm burrow init`
 once, then `docker compose up -d`.
 
+## Kubernetes
+
+A Helm chart ships in `charts/burrow/` and maps burrow onto native resources:
+your recovery phrase lives in a **Secret** (an init container derives the repo
+key from it on first boot — never in env or logs), `config.toml` lives in a
+**ConfigMap**, identity and blobs on **PVCs** in a single-replica
+**StatefulSet**, and the folders you back up mount read-only via `hostPath`
+or existing claims. No inbound ports needed, no root anywhere (uid 10001 +
+`fsGroup`, PodSecurity "restricted" friendly).
+
+```console
+# one-time: generate your identity, stash the phrase OFF the cluster
+$ docker run --rm ghcr.io/solidsilver/burrow:0.2.2 init
+
+$ kubectl create namespace burrow
+$ kubectl -n burrow create secret generic burrow-identity \
+    --from-literal=recovery-phrase='word1 word2 ... word24'
+$ helm install burrow ./charts/burrow -n burrow \
+    --set burrow.existingSecret=burrow-identity
+
+$ kubectl -n burrow exec burrow-0 -- burrow status
+$ kubectl -n burrow exec burrow-0 -- burrow peer invite
+```
+
+Backup sources, the optional web UI (Service/Ingress), and disaster recovery
+are covered in [charts/burrow/README.md](charts/burrow/README.md). One rule:
+**never scale beyond one replica** — one repo key is one node identity.
+
 ## Security model
 
 - Peers are Ed25519 keys (iroh endpoint IDs); every connection is mutually

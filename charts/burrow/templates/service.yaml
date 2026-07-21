@@ -1,0 +1,19 @@
+{{- if .Values.web.service.enabled }}
+# Web UI + JSON API. Plain HTTP with a bearer token — put TLS in front
+# (ingress below, or reach it over Tailscale). Get the token with:
+#   kubectl exec <pod> -- burrow web token
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "burrow.fullname" . }}
+  labels:
+    {{- include "burrow.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.web.service.type }}
+  selector:
+    {{- include "burrow.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: web
+      port: {{ .Values.web.service.port }}
+      targetPort: web
+{{- end }}

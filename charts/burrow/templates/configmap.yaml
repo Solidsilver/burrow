@@ -1,0 +1,14 @@
+# config.toml, mounted read-only into the pod at /configmap and symlinked
+# into burrow's config dir by the bootstrap init container (the config dir
+# itself must stay writable — burrow keeps repo.key, device.name and
+# web.token next to config.toml). The StatefulSet pod template carries a
+# checksum of this manifest, so editing the config rolls the pod.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "burrow.fullname" . }}
+  labels:
+    {{- include "burrow.labels" . | nindent 4 }}
+data:
+  config.toml: |
+{{ .Values.config | indent 4 }}

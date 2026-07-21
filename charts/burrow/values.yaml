@@ -1,0 +1,192 @@
+# burrow Helm values — distributed backup among friends, over iroh.
+# https://github.com/solidsilver/burrow
+#
+# The chart runs ONE burrow daemon as a single-replica StatefulSet:
+#
+#   * your 24-word recovery phrase lives in a Secret (the only thing that
+#     decrypts your backups — burrow never stores it, it derives the repo key)
+#   * config.toml lives in a ConfigMap (mounted into the pod read-only)
+#   * identity + metadata + blobs live on PersistentVolumeClaims
+#
+# No inbound ports are needed: iroh hole-punches outbound with relay fallback.
+# Only the optional web UI gets a Service/Ingress.
+
+image:
+  repository: ghcr.io/solidsilver/burrow
+  # Defaults to the chart's appVersion. Pin to a release, e.g. "0.2.2".
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+burrow:
+  # -- Identity bootstrap (choose ONE) -------------------------------------
+  #
+  # Your 24-word recovery phrase. An init container pipes it into
+  # `burrow recover` (via stdin, never argv/logs) on first boot to derive the
+  # repo key; on later boots the key already exists on the config PVC and the
+  # phrase is not touched again.
+  #
+  # Option A: let the chart create the Secret from this value.
+  #   Convenient, but the phrase lands in your values file — do NOT commit
+  #   that file to git. Prefer option B for anything serious.
+  recoveryPhrase: ""
+  #
+  # Option B: reference a Secret you manage yourself (kubectl, SOPS,
+  # Sealed Secrets, External Secrets...). Create it before install — or
+  # right after: the pod simply stays Pending until the Secret exists.
+  #
+  #   kubectl create secret generic burrow-identity \
+  #     --from-literal=recovery-phrase='word1 word2 ... word24'
+  #
+  # Generate a fresh identity (and phrase) on any machine first:
+  #
+  #   docker run --rm ghcr.io/solidsilver/burrow:0.2.2 init
+  #
+  existingSecret: ""
+  # Key inside the Secret that holds the phrase.
+  existingSecretKey: recovery-phrase
+
+  # Stable device name for this machine (part of your device identity, shown
+  # to friends). Written once on first boot. Defaults to the pod hostname
+  # ("<release>-burrow-0"), which is stable across restarts and reschedules.
+  # Set it explicitly if you ever plan to rename the helm release.
+  # Must match [a-zA-Z0-9_-]+.
+  deviceName: ""
+
+# -- config.toml ------------------------------------------------------------
+# Rendered into a ConfigMap and mounted read-only. The pod rolls
+# automatically when this changes. See contrib/config.example.toml for the
+# full schema. IMPORTANT: every path under [[backup]] must be mounted into
+# the pod — see backupSources below.
+config: |
+  [node]
+  name = "k8s-node"
+
+  [device]
+  mode = "host"
+
+  [storage]
+  offer_max = "200gb"
+
+  # [[backup]]
+  # id = "photos"
+  # paths = ["/tank/photos"]     # mounted via backupSources below
+  # replicas = 3
+  # min_offsite = 1
+  # schedule = "0 3 * * *"
+  # keep_last = 30
+
+  # Web UI + JSON API. Also set web.service.enabled (and web.ingress) below.
+  # Binding 0.0.0.0 inside the pod is fine: clients are never loopback, so
+  # every request needs the bearer token (`kubectl exec <pod> -- burrow web
+  # token`). trust_loopback = false makes that explicit, and allowed_hosts
+  # must list every hostname you browse by (ingress host included).
+  # [web]
+  # enable = true
+  # bind = "0.0.0.0:8385"
+  # trust_loopback = false
+  # allowed_hosts = ["burrow.example.com"]
+
+# -- Persistent state -------------------------------------------------------
+# burrow is stateful: the config volume holds the repo key (SECRET — it
+# decrypts your backups), the data volume holds the SQLite metadata and the
+# blob store (your snapshots + what you hold for friends). Size `data` for
+# [storage] offer_max plus your own local snapshot cache.
+#
+# Prefer block/local storage over NFS: SQLite wants working file locks.
+persistence:
+  config:
+    size: 100Mi
+    # storageClass: "local-path"   # empty = cluster default
+    storageClass: ""
+  data:
+    size: 250Gi
+    storageClass: ""
+  # Optional third volume for the bulk blob store (BURROW_BLOBS_DIR), e.g. a
+  # big HDD pool while metadata stays on fast storage.
+  blobs:
+    enabled: false
+    size: 1Ti
+    storageClass: ""
+
+# -- Folders to back up ------------------------------------------------------
+# The pod can only back up what it can mount. Mount each host folder (or an
+# existing PVC) read-only at the SAME path listed under [[backup]] paths.
+# hostPath sources pin you to one node — combine with nodeSelector/affinity.
+#
+# backupSources:
+#   - name: photos
+#     hostPath: /tank/photos       # host directory (must exist)
+#     # mountPath defaults to the hostPath value — same path in the pod
+#     readOnly: true
+#   - name: documents
+#     existingClaim: documents-pvc  # or mount another PVC
+#     mountPath: /srv/documents
+backupSources: []
+
+# -- Optional web UI exposure ------------------------------------------------
+# Requires [web] enable = true in config above. The API is plain HTTP with a
+# bearer token — terminate TLS at the ingress (or reach it over Tailscale).
+web:
+  service:
+    enabled: false
+    type: ClusterIP
+    port: 8385
+  ingress:
+    enabled: false              # requires web.service.enabled = true
+    className: ""
+    annotations: {}
+      # cert-manager.io/cluster-issuer: letsencrypt
+    hosts:
+      - host: burrow.example.com   # must also appear in [web] allowed_hosts
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+      # - secretName: burrow-tls
+      #   hosts: ["burrow.example.com"]
+
+serviceAccount:
+  create: true
+  name: ""
+  # burrow never talks to the Kubernetes API.
+  automountToken: false
+
+# Image runs as uid/gid 10001. fsGroup makes the PVCs writable without any
+# root init containers, so the chart fits PodSecurity "restricted".
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+  # readOnlyRootFilesystem works (state lives on volumes, /tmp and the
+  # control-socket dir are emptyDir), it is just not the default.
+  readOnlyRootFilesystem: false
+
+resources: {}
+  # requests:
+  #   cpu: 100m
+  #   memory: 256Mi
+  # limits:
+  #   memory: 1Gi
+
+# Pin the pod where your data lives (hostPath sources) — e.g. your NAS node.
+nodeSelector: {}
+affinity: {}
+tolerations: []
+
+podAnnotations: {}
+
+# Extra environment for the daemon container (rarely needed; all paths are
+# already pinned by the chart).
+extraEnv: []

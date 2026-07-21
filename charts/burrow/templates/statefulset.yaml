@@ -1,0 +1,210 @@
+{{- include "burrow.validate" . -}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "burrow.fullname" . }}
+  labels:
+    {{- include "burrow.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "burrow.fullname" . }}-headless
+  # NEVER scale this up: one repo key = one node identity. Two pods with the
+  # same identity confuse every peer (and two writers corrupt the SQLite
+  # metadata). Your data survives pod loss — replicas live on your friends.
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "burrow.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        # Roll the pod when config.toml changes (it is only read at startup).
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum | quote }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "burrow.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "burrow.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountToken }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        # First-boot identity bootstrap: symlink config.toml in from the
+        # ConfigMap, pin the device name if requested, and — only when no
+        # repo.key exists yet — derive it from the recovery phrase held in
+        # the Secret (`burrow recover` reads the phrase from stdin; it never
+        # touches argv, env, or logs). Idempotent: once repo.key exists on
+        # the config PVC this container only maintains the symlink.
+        - name: bootstrap
+          image: {{ include "burrow.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              mkdir -p "$BURROW_CONFIG_DIR" "$BURROW_DATA_DIR"{{ if .Values.persistence.blobs.enabled }} "$BURROW_BLOBS_DIR"{{ end }}
+              ln -sfn /configmap/config.toml "$BURROW_CONFIG_DIR/config.toml"
+              {{- if .Values.burrow.deviceName }}
+              if [ ! -f "$BURROW_CONFIG_DIR/device.name" ]; then
+                printf '%s\n' {{ .Values.burrow.deviceName | quote }} > "$BURROW_CONFIG_DIR/device.name"
+              fi
+              {{- end }}
+              if [ ! -s "$BURROW_CONFIG_DIR/repo.key" ]; then
+                echo "no repo key yet — recovering identity from the recovery-phrase secret"
+                burrow recover < /secret/recovery-phrase
+              else
+                echo "repo key already present, skipping recovery"
+              fi
+          env:
+            {{- include "burrow.env" . | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: data
+              mountPath: /data
+            {{- if .Values.persistence.blobs.enabled }}
+            - name: blobs
+              mountPath: /blobs
+            {{- end }}
+            - name: configmap
+              mountPath: /configmap
+              readOnly: true
+            - name: recovery-phrase
+              mountPath: /secret
+              readOnly: true
+      containers:
+        - name: burrow
+          image: {{ include "burrow.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # Image ENTRYPOINT is `burrow`, CMD is `daemon run` — nothing to
+          # override. Day-to-day CLI runs via: kubectl exec <pod> -- burrow …
+          env:
+            {{- include "burrow.env" . | nindent 12 }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- if .Values.web.service.enabled }}
+          ports:
+            - name: web
+              containerPort: 8385
+          {{- end }}
+          # Probes drive the CLI against the local control socket: exit 0 iff
+          # the daemon answers. Works with the web UI off (no HTTP to hit).
+          startupProbe:
+            exec:
+              command: ["burrow", "status"]
+            periodSeconds: 5
+            timeoutSeconds: 10
+            failureThreshold: 24 # up to ~2 min for first-boot endpoint setup
+          livenessProbe:
+            exec:
+              command: ["burrow", "status"]
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command: ["burrow", "status"]
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: data
+              mountPath: /data
+            {{- if .Values.persistence.blobs.enabled }}
+            - name: blobs
+              mountPath: /blobs
+            {{- end }}
+            - name: run
+              mountPath: /run/burrow
+            - name: tmp
+              mountPath: /tmp
+            {{- range .Values.backupSources }}
+            - name: backup-{{ .name }}
+              mountPath: {{ .mountPath | default .hostPath }}
+              readOnly: {{ .readOnly | default true }}
+            {{- end }}
+      volumes:
+        - name: configmap
+          configMap:
+            name: {{ include "burrow.fullname" . }}
+        - name: recovery-phrase
+          secret:
+            secretName: {{ include "burrow.secretName" . }}
+            defaultMode: 0440 # root:10001 — readable by the burrow group only
+            items:
+              - key: {{ .Values.burrow.existingSecretKey }}
+                path: recovery-phrase
+        - name: run
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+        {{- range .Values.backupSources }}
+        - name: backup-{{ .name }}
+          {{- if .hostPath }}
+          hostPath:
+            path: {{ .hostPath }}
+            type: Directory
+          {{- else }}
+          persistentVolumeClaim:
+            claimName: {{ .existingClaim }}
+            readOnly: {{ .readOnly | default true }}
+          {{- end }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: config
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.persistence.config.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.config.size }}
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.persistence.data.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.data.size }}
+    {{- if .Values.persistence.blobs.enabled }}
+    - metadata:
+        name: blobs
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.persistence.blobs.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.blobs.size }}
+    {{- end }}
