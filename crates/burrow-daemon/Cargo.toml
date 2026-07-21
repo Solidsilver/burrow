@@ -20,7 +20,7 @@ iroh-blobs = { version = "0.103", features = ["fs-store"] }
 # buffering them); same version iroh-blobs already pulls in.
 iroh-io = "0.6"
 postcard.workspace = true
-getrandom = "0.3"
+getrandom = "0.4"
 rusqlite = { version = "0.37", features = ["bundled"] }
 rusqlite_migration = "2"
 toml = "0.9"
