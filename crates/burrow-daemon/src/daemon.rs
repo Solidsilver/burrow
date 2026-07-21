@@ -32,6 +32,8 @@ pub struct AppState {
     /// Background work suspended until this unix time (u64::MAX = until
     /// resumed). Manual commands ignore this.
     pub paused_until: std::sync::Mutex<Option<u64>>,
+    /// Per-owner cap + in-flight byte accounting for RequestStore (M2).
+    pub store_limiter: crate::peers::StoreLimiter,
 }
 
 impl AppState {
@@ -66,6 +68,10 @@ impl AppState {
 
 /// Run the daemon until ctrl-c / SIGTERM.
 pub async fn run(config: Config) -> anyhow::Result<()> {
+    // Manual runs (no systemd UMask=0077) leave these at umask perms; they
+    // hold the repo key, tokens, and the metadata DB.
+    crate::paths::ensure_private_dir(&crate::paths::config_dir())?;
+    crate::paths::ensure_private_dir(&crate::paths::data_dir())?;
     let repo_key = crate::keys::load(&crate::paths::repo_key_file())?;
     let db = Db::open(&crate::paths::db_file())?;
     let blobs_dir = crate::paths::blobs_dir();
@@ -164,6 +170,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         backup_lock: tokio::sync::Mutex::new(()),
         replicate_lock: tokio::sync::Mutex::new(()),
         paused_until: std::sync::Mutex::new(None),
+        store_limiter: crate::peers::StoreLimiter::default(),
     });
 
     // Register ourselves: the self owner row and this device.

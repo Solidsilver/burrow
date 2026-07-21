@@ -39,8 +39,10 @@ you                          anna's NAS                     ben's homelab
 - **Per-backup redundancy**: `replicas = 3` keeps three copies on distinct
   peers. A placement planner spreads chunks by free space and liveness.
 - **Self-healing**: peers offline past a grace period (default 72h) trigger
-  re-replication. Random chunks are cryptographically spot-checked hourly —
-  a verified range read is proof of possession, courtesy of BLAKE3 streaming.
+  re-replication. Random chunks are cryptographically spot-checked hourly,
+  courtesy of BLAKE3 range proofs. A passed check proves the holder can
+  *produce* your bytes right now — not that it stores them (see the
+  lazy-holder caveat in the security model).
 - **Graceful shrink/revoke**: shrink a grant and the owner's daemon evacuates
   data elsewhere; forced eviction only after a deadline (default 14 days).
 - **One identity, many devices**: your NAS, desktop, and laptop share one
@@ -163,15 +165,32 @@ bind = "127.0.0.1:8385"   # default
 ```
 
 Restart the daemon and open http://127.0.0.1:8385. Loopback browsers are
-trusted (same model as the control socket). To reach it from another machine
-(LAN, Tailscale), bind e.g. `0.0.0.0:8385` — non-loopback clients must send
-the auto-generated token (`burrow web token` prints it; stored `0600` in
-`~/.config/burrow/web.token`).
+trusted without a token — similar to the control socket, with one
+difference: the socket is owner-UID-only (`0600`), while the HTTP listener
+trusts a browser running as *any* local UID. Every request must also carry a
+recognized `Host` (an IP literal, `localhost`, or a name in `allowed_hosts`)
+and mutating requests reject cross-site `Origin`/`Sec-Fetch-Site` — together
+these stop a malicious web page from driving your daemon via DNS rebinding.
+
+To reach it from another machine (LAN, Tailscale), bind e.g. `0.0.0.0:8385`
+— non-loopback clients must send the auto-generated token (`burrow web token`
+prints it; stored `0600` in `~/.config/burrow/web.token`). The transport is
+plain HTTP: on an untrusted LAN a sniffer sees the token once and owns the
+API. Prefer binding on a Tailscale interface, or a TLS-terminating proxy. If
+you reach the UI by a DNS name (LAN hostname or proxy vhost), allowlist it:
+
+```toml
+[web]
+enable = true
+bind = "0.0.0.0:8385"
+allowed_hosts = ["burrow.example.com"]
+```
 
 **Reverse-proxy warning**: loopback trust is based on the client IP. If you
 put the UI behind a same-host reverse proxy (nginx, Caddy), every remote
 client arrives as `127.0.0.1` and would be trusted — set
-`trust_loopback = false` under `[web]` so all clients need the token.
+`trust_loopback = false` under `[web]` so all clients need the token, and
+list the public vhost name in `allowed_hosts`.
 
 Docker: publish the port and enable in your mounted config, e.g.
 `docker run -p 8385:8385 …` with `bind = "0.0.0.0:8385"`; the token lives in
@@ -270,6 +289,9 @@ volumes inherit the right ownership automatically, but a *bind* mount must be
 
 Build it yourself with `docker build -t burrow .` (compiles from source); the
 published images are built with `--target prebuilt` from the release binary.
+All release artifacts (archives, packages, images) carry SLSA build
+provenance attestations — verify with
+`gh attestation verify <file-or-image> --repo solidsilver/burrow`.
 
 Prefer Compose? A self-documenting `compose.yaml` with the optional bits
 commented out ships in the repo root: `docker compose run --rm burrow init`
@@ -283,12 +305,39 @@ once, then `docker compose up -d`.
   `chunk_key = BLAKE3-derive(repo_key ‖ keyed-hash(repo_key, plaintext))`,
   XChaCha20-Poly1305. Deterministic per repo key (stable content addresses,
   index-loss-proof), but keyed — no public convergent-encryption attacks.
-  Holders learn only ciphertext sizes and equality among *your own* chunks.
+  Holders learn ciphertext sizes and equality among *your own* chunks, plus
+  which small blobs are your snapshot manifests (they are flagged so disaster
+  recovery can find them) — so snapshot cadence and count are visible, and a
+  holder deleting only manifests can orphan every snapshot. Keep
+  `replicas >= 2` on distinct friends.
 - Blob access is gated per peer per hash: friends can fetch only blobs they
   own (theirs, stored on you) or replicas you asked them to hold.
 - Threat model: honest-but-curious friends. Spot-checks catch bit rot and
-  quietly deleted data; there are no Byzantine-fault incentives — if you don't
-  trust someone with your ciphertext, don't peer with them.
+  quietly deleted data, but they are proof of *access*, not proof of
+  *possession*: a deliberately cheating holder can pass them by proxying the
+  challenged chunks from you while storing nothing. Treat replica counts as
+  assurance, not a guarantee; there are no Byzantine-fault incentives — if
+  you don't trust someone with your ciphertext, don't peer with them.
+
+Accepted risks worth knowing:
+
+- **Local-user trust.** Any process running as your daemon's user (or root)
+  gets full daemon control and can print the recovery phrase — local malware
+  as your user owns your backups.
+- **Ticket authenticity.** A pairing ticket is the trust root: if an attacker
+  swaps it in transit, you silently peer with *their* machine (they still get
+  only ciphertext and metadata). Use a channel with integrity, and compare
+  the endpoint id prefixes shown by `burrow status` / `burrow requests`
+  out-of-band.
+- **Relay/discovery metadata.** The endpoint uses n0's preset relays and
+  discovery: relay operators and network observers learn endpoint-ID↔IP
+  mappings, online times, and traffic volume/timing. Payloads remain
+  end-to-end encrypted.
+- **No remote delete.** Removing a friend revokes future access; ciphertext
+  they already hold stays on their disk.
+- **Web transport.** The web API is plain HTTP — bound beyond loopback, the
+  bearer token travels in cleartext. Use Tailscale or a TLS proxy (see the
+  Web UI section).
 
 ## How it works
 

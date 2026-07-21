@@ -181,15 +181,18 @@ pub async fn fetch_blob(
     Ok(())
 }
 
-/// Run a validated bao export of the whole blob, discarding the data.
+/// Run a validated bao export of the whole blob, draining it into a sink.
 /// Local reads are checked against the outboard, so any corruption of the
-/// stored bytes surfaces as an error. Only called on rare skip/heal paths,
-/// so buffering one blob is fine.
+/// stored bytes surfaces as an error (same error semantics as
+/// `ExportBaoProgress::write`). Draining keeps peak memory at one chunk:
+/// collecting with `data_to_vec` would buffer the entire blob, and a
+/// friend's blob can be tens of GB (remote OOM via routine re-store, M3).
 async fn local_blob_valid(blobs: &iroh_blobs::api::Store, hash: iroh_blobs::Hash) -> bool {
+    let mut sink = iroh_io::TokioStreamWriter(tokio::io::sink());
     blobs
         .blobs()
         .export_bao(hash, iroh_blobs::protocol::ChunkRanges::all())
-        .data_to_vec()
+        .write(&mut sink)
         .await
         .is_ok()
 }

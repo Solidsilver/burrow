@@ -231,7 +231,7 @@ fn migrations() -> Migrations<'static> {
 impl Db {
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            crate::paths::ensure_private_dir(parent)?;
         }
         let mut conn = Connection::open(path)
             .with_context(|| format!("opening database {}", path.display()))?;
@@ -240,6 +240,24 @@ impl Db {
         migrations()
             .to_latest(&mut conn)
             .context("running database migrations")?;
+        // The DB lists every backed-up path and friend ticket — it must not
+        // inherit a loose umask. WAL/SHM may be absent after a clean
+        // checkpoint (recreated on first write, under the now-private dir).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for suffix in ["", "-wal", "-shm"] {
+                let mut p = path.as_os_str().to_owned();
+                p.push(suffix);
+                let f = std::path::PathBuf::from(p);
+                match std::fs::metadata(&f) {
+                    Ok(_) => std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o600))
+                        .with_context(|| format!("chmod 0600 {}", f.display()))?,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e).with_context(|| format!("stat {}", f.display())),
+                }
+            }
+        }
 
         let (tx, rx) = std::sync::mpsc::channel::<Job>();
         std::thread::Builder::new()

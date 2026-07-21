@@ -16,6 +16,9 @@ tokio = { version = "1", features = ["full"] }
 iroh = "1"
 iroh-tickets = "1"
 iroh-blobs = { version = "0.103", features = ["fs-store"] }
+# Direct dep for TokioStreamWriter (drain-validating local blobs without
+# buffering them); same version iroh-blobs already pulls in.
+iroh-io = "0.6"
 postcard.workspace = true
 getrandom = "0.3"
 rusqlite = { version = "0.37", features = ["bundled"] }

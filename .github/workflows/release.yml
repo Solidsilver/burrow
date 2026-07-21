@@ -4,9 +4,9 @@ on:
   push:
     tags: ['v*']
 
+# Default to read-only; jobs escalate individually below.
 permissions:
-  contents: write
-  packages: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -14,6 +14,11 @@ env:
 jobs:
   build:
     name: build ${{ matrix.target }}
+    permissions:
+      contents: read
+      packages: write # push image digests to GHCR (Linux targets)
+      id-token: write # keyless Sigstore identity for attestations
+      attestations: write
     strategy:
       fail-fast: false
       matrix:
@@ -37,16 +42,18 @@ jobs:
             os: macos-14
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      # Branch pin (@stable): dependabot can't bump it — update the SHA by
+      # hand when a newer toolchain is wanted.
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: ${{ matrix.target }}
 
       # Build the web UI first: the release binary embeds web-dist/ via
       # rust-embed (missing assets degrade to a placeholder page, so ordering
       # matters for the published artifacts).
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 22
           cache: npm
@@ -58,19 +65,22 @@ jobs:
       # Host == target on every runner above, so no cross-compilation: a plain
       # release build lands in target/release, which is what cargo-deb and
       # cargo-generate-rpm expect (their magic target/release/ prefix).
+      # --locked: refuse to build release artifacts from a drifting lockfile.
       - name: Build
-        run: cargo build --release --bin burrow
+        run: cargo build --release --locked --bin burrow
 
       # The prebuilt Docker target copies this exact binary into
       # debian:bookworm-slim (glibc 2.36), and tarballs/.debs land on arbitrary
       # distros — prove it actually starts on the runtime image's glibc before
       # anything is packaged or pushed. Fails the release if a runner/image
-      # bump ever links a newer glibc again.
+      # bump ever links a newer glibc again. Digest-pinned to the same image
+      # as the Dockerfile runtime stage (bump both together).
       - name: Smoke test on bookworm-slim (runtime image glibc)
         if: matrix.linux
         shell: bash
         run: |
-          docker run --rm -v "$PWD/target/release:/out:ro" debian:bookworm-slim \
+          docker run --rm -v "$PWD/target/release:/out:ro" \
+            debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 \
             /out/burrow --version
 
       - name: Package tarball
@@ -106,7 +116,7 @@ jobs:
           cp target/generate-rpm/*.rpm dist/
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: burrow-${{ matrix.target }}
           path: |
@@ -131,24 +141,34 @@ jobs:
           echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
       - name: Log in to GHCR
         if: matrix.platform
-        uses: docker/login-action@v4
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Set up Buildx
         if: matrix.platform
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
       - name: Build and push image by digest
         if: matrix.platform
         id: image
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: .
           target: prebuilt
           platforms: ${{ matrix.platform }}
           provenance: false
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+      # SLSA provenance for the image, pushed to GHCR alongside it (the
+      # explicit attestation above replaces build-push's own provenance,
+      # which stays off so the manifest list stays a plain OCI index).
+      - name: Attest image provenance
+        if: matrix.platform
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true
       - name: Export digest
         if: matrix.platform
         shell: bash
@@ -159,7 +179,7 @@ jobs:
           IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
       - name: Upload image digest
         if: matrix.platform
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: digest-${{ matrix.target }}
           path: /tmp/digests/*
@@ -170,8 +190,12 @@ jobs:
     name: publish release
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the GitHub release
+      id-token: write # keyless Sigstore identity for attestations
+      attestations: write
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: artifacts
       - name: Collect artifacts and checksums
@@ -183,8 +207,14 @@ jobs:
           ( cd release && sha256sum * ) > SHA256SUMS
           mv SHA256SUMS release/
           ls -l release
+      # SLSA provenance for every published file (incl. SHA256SUMS);
+      # verifiable with `gh attestation verify`.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: release/*
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: release/*
           generate_release_notes: true
@@ -194,18 +224,29 @@ jobs:
     name: bump homebrew tap
     needs: release
     runs-on: ubuntu-latest
+    permissions:
+      contents: read # pushes use the tap PAT, not GITHUB_TOKEN
     # Skip prereleases (tags containing a hyphen, e.g. v0.1.2-rc.1).
     if: ${{ !contains(github.ref_name, '-') }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: artifacts
       - name: Render formula
         shell: bash
         run: |
+          set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
-          sha() { find artifacts -name "burrow-${version}-$1.tar.gz" -exec sha256sum {} \; | awk '{print $1}'; }
+          sha() {
+            local s
+            s="$(find artifacts -name "burrow-${version}-$1.tar.gz" -exec sha256sum {} \; | awk '{print $1}')"
+            if [ -z "$s" ]; then
+              echo "::error::no tarball/sha256 for $1 — refusing an empty formula sha"
+              exit 1
+            fi
+            echo "$s"
+          }
           cp packaging/homebrew/burrow.rb.tmpl burrow.rb
           sed -i "s/@@VERSION@@/${version}/g"                       burrow.rb
           sed -i "s/@@SHA256_DARWIN_ARM64@@/$(sha aarch64-apple-darwin)/g"      burrow.rb
@@ -218,11 +259,14 @@ jobs:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         shell: bash
         run: |
+          set -euo pipefail
           if [ -z "${GH_TOKEN:-}" ]; then
             echo "::warning::HOMEBREW_TAP_TOKEN not set — skipping tap update."
             exit 0
           fi
-          git clone "https://x-access-token:${GH_TOKEN}@github.com/solidsilver/homebrew-burrow.git" tap
+          # Clone anonymously (taps are public) so the PAT never lands in
+          # .git/config; send it only as a one-shot push header.
+          git clone "https://github.com/solidsilver/homebrew-burrow.git" tap
           mkdir -p tap/Formula
           cp burrow.rb tap/Formula/burrow.rb
           cd tap
@@ -230,7 +274,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add Formula/burrow.rb
           git commit -m "burrow ${GITHUB_REF_NAME#v}" || { echo "no formula changes"; exit 0; }
-          git push
+          git -c http.extraHeader="Authorization: Bearer ${GH_TOKEN}" push
 
   docker-image:
     name: push multi-arch image
@@ -240,17 +284,17 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: digests
           pattern: digest-*
           merge-multiple: true
-      - uses: docker/login-action@v4
+      - uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/setup-buildx-action@v4
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
       - name: Create and push manifest list
         shell: bash
         run: |

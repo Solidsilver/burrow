@@ -396,15 +396,7 @@ fn recover() -> anyhow::Result<()> {
     let phrase = read_phrase("enter your 24-word recovery phrase: ")?;
     let key = burrow_core::RepoKey::from_recovery_phrase(phrase.trim())
         .context("that phrase doesn't decode to a valid repo key")?;
-    std::fs::create_dir_all(burrow_daemon::paths::config_dir())?;
-    // Reuse the init-path writer for permissions; write the recovered key.
-    let hex: String = key.as_bytes().iter().map(|b| format!("{b:02x}")).collect();
-    std::fs::write(&key_path, hex + "\n")?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))?;
-    }
+    burrow_daemon::keys::save_key(&key_path, &key)?;
     println!("repo key recovered to {}", key_path.display());
     println!("your node identity is derived from it, so peers will recognize this machine.");
     println!();
@@ -596,7 +588,13 @@ async fn device_join(ticket: String, device: Option<String>) -> anyhow::Result<(
         }
         Ok(other) => anyhow::bail!("unexpected reply: {other:?}"),
         Err(_) => {
-            std::fs::write(burrow_daemon::paths::join_ticket_file(), ticket)?;
+            // The ticket carries dial hints — owner-only file, private dir,
+            // and the daemon may never have run here yet.
+            let ticket_path = burrow_daemon::paths::join_ticket_file();
+            if let Some(parent) = ticket_path.parent() {
+                burrow_daemon::paths::ensure_private_dir(parent)?;
+            }
+            burrow_daemon::paths::write_private(&ticket_path, &ticket)?;
             println!(
                 "daemon not running — ticket saved; it will link automatically when you run \
                  `burrow daemon run`"
@@ -750,7 +748,7 @@ async fn status() -> anyhow::Result<()> {
 
 fn init(name: Option<String>) -> anyhow::Result<()> {
     let config_dir = burrow_daemon::paths::config_dir();
-    std::fs::create_dir_all(&config_dir)?;
+    burrow_daemon::paths::ensure_private_dir(&config_dir)?;
 
     let key_path = burrow_daemon::paths::repo_key_file();
     let key = burrow_daemon::keys::generate_and_save(&key_path)

@@ -6,27 +6,27 @@ use anyhow::{bail, Context};
 use burrow_core::RepoKey;
 
 pub fn generate_and_save(path: &Path) -> anyhow::Result<RepoKey> {
-    if path.exists() {
-        bail!(
-            "repo key already exists at {} — refusing to overwrite it",
-            path.display()
-        );
-    }
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        crate::paths::ensure_private_dir(parent)?;
     }
     let key = RepoKey::generate();
     let hex: String = key.as_bytes().iter().map(|b| format!("{b:02x}")).collect();
-    std::fs::write(path, hex + "\n")?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    }
+    // create_new: the no-overwrite check and the 0600 create are atomic.
+    crate::paths::create_private(path, &(hex + "\n")).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            anyhow::anyhow!(
+                "repo key already exists at {} — refusing to overwrite it",
+                path.display()
+            )
+        } else {
+            anyhow::Error::new(e).context(format!("writing repo key {}", path.display()))
+        }
+    })?;
     Ok(key)
 }
 
 pub fn load(path: &Path) -> anyhow::Result<RepoKey> {
+    crate::paths::check_private_file(path, "repo key");
     let text = std::fs::read_to_string(path).with_context(|| {
         format!(
             "reading repo key {} (run `burrow init` first?)",
@@ -96,7 +96,7 @@ pub fn load_or_create_device_name(path: &Path, preferred: Option<&str>) -> anyho
         }
     };
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        crate::paths::ensure_private_dir(parent)?;
     }
     std::fs::write(path, format!("{name}\n"))?;
     Ok(name)
@@ -105,15 +105,11 @@ pub fn load_or_create_device_name(path: &Path, preferred: Option<&str>) -> anyho
 /// Write a recovered repo key (shared by init and `burrow recover`).
 pub fn save_key(path: &Path, key: &RepoKey) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        crate::paths::ensure_private_dir(parent)?;
     }
     let hex: String = key.as_bytes().iter().map(|b| format!("{b:02x}")).collect();
-    std::fs::write(path, hex + "\n")?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    }
+    crate::paths::write_private(path, &(hex + "\n"))
+        .with_context(|| format!("writing repo key {}", path.display()))?;
     Ok(())
 }
 
@@ -132,5 +128,11 @@ mod tests {
             generate_and_save(&path).is_err(),
             "must refuse to overwrite"
         );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "key must be owner-only from creation");
+        }
     }
 }

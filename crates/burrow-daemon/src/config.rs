@@ -106,6 +106,11 @@ pub struct WebConfig {
     /// socket). Set false when the UI sits behind a reverse proxy: a
     /// same-host proxy makes every remote client look like 127.0.0.1.
     pub trust_loopback: bool,
+    /// Extra `Host` names to accept beyond IP literals and localhost, e.g.
+    /// "burrow.example.com" when the API sits behind a reverse proxy. The
+    /// DNS-rebinding guard rejects requests whose `Host` is a DNS name not
+    /// listed here (a rebound attack page always keeps its own domain).
+    pub allowed_hosts: Vec<String>,
 }
 
 impl Default for WebConfig {
@@ -114,6 +119,7 @@ impl Default for WebConfig {
             enable: false,
             bind: "127.0.0.1:8385".into(),
             trust_loopback: true,
+            allowed_hosts: Vec::new(),
         }
     }
 }

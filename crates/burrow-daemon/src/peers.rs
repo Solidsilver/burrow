@@ -34,6 +34,78 @@ fn now_unix() -> u64 {
 /// machines; low enough that 32 pending strangers can't exhaust disk.
 const MAX_DEVICES_PER_OWNER: i64 = 32;
 
+/// Max concurrent RequestStore transfers per owner (M2). A friend firing N
+/// parallel stores gets at most this many fetches; the rest fail fast
+/// instead of each pulling grant-sized ciphertext before the transactional
+/// quota re-check can reject them.
+const MAX_INFLIGHT_STORES: u32 = 4;
+
+/// Per-owner in-flight RequestStore accounting: bounds concurrency and
+/// charges claimed bytes against the grant at admission, so a parallel
+/// flood can't over-fetch (the DB re-check inside the insert transaction
+/// remains the authoritative quota decision).
+#[derive(Default)]
+pub struct StoreLimiter {
+    inner: std::sync::Mutex<std::collections::HashMap<[u8; 32], (u32, u64)>>,
+}
+
+/// Why a store was refused at admission.
+#[derive(Debug)]
+pub enum StoreRefusal {
+    /// Too many concurrent transfers — transient, retry shortly.
+    Busy,
+    /// In-flight + claimed bytes would exceed the remaining grant.
+    Quota,
+}
+
+/// RAII reservation; drop releases the slot and the charged bytes.
+pub struct StorePermit<'a> {
+    limiter: &'a StoreLimiter,
+    owner: [u8; 32],
+    bytes: u64,
+}
+
+impl StoreLimiter {
+    /// Reserve a slot and charge `bytes` against `headroom` (grant minus
+    /// used). `bytes = 0` (re-validation of an already-held blob) takes only
+    /// a concurrency slot.
+    pub fn try_acquire(
+        &self,
+        owner: [u8; 32],
+        bytes: u64,
+        headroom: u64,
+    ) -> Result<StorePermit<'_>, StoreRefusal> {
+        let mut map = self.inner.lock().expect("store limiter poisoned");
+        let (tasks, inflight) = map.entry(owner).or_default();
+        if *tasks >= MAX_INFLIGHT_STORES {
+            return Err(StoreRefusal::Busy);
+        }
+        if inflight.saturating_add(bytes) > headroom {
+            return Err(StoreRefusal::Quota);
+        }
+        *tasks += 1;
+        *inflight = inflight.saturating_add(bytes);
+        Ok(StorePermit {
+            limiter: self,
+            owner,
+            bytes,
+        })
+    }
+}
+
+impl Drop for StorePermit<'_> {
+    fn drop(&mut self) {
+        let mut map = self.limiter.inner.lock().expect("store limiter poisoned");
+        if let Some((tasks, inflight)) = map.get_mut(&self.owner) {
+            *tasks = tasks.saturating_sub(1);
+            *inflight = inflight.saturating_sub(self.bytes);
+            if *tasks == 0 {
+                map.remove(&self.owner);
+            }
+        }
+    }
+}
+
 /// Resolved caller identity for a peer request.
 pub struct Caller {
     pub owner_pk: [u8; 32],
@@ -992,14 +1064,35 @@ async fn handle_inner(
                     })
                     .await?
             };
-            // Fast refusal on the claimed size; authoritative check below.
-            // saturating_add so an absurd claimed `size` can't wrap past the
-            // limit instead of tripping it.
-            if !already_held && used.saturating_add(size) > granted {
-                return Ok(PeerReply::Error(format!(
-                    "quota exceeded: {used} + {size} > {granted} available"
-                )));
-            }
+            // Admission control (M2): cap concurrent stores per owner and
+            // charge the claimed size against the remaining grant now, so a
+            // parallel flood fails fast instead of each pulling grant-sized
+            // ciphertext before the transactional re-check can reject them.
+            // (The in-transaction re-check below remains authoritative.)
+            let permit = if already_held {
+                // No transfer expected: a slot only, so floods of
+                // re-validation requests can't stack up either.
+                state
+                    .store_limiter
+                    .try_acquire(caller.owner_pk, 0, u64::MAX)
+            } else {
+                state
+                    .store_limiter
+                    .try_acquire(caller.owner_pk, size, granted.saturating_sub(used))
+            };
+            let _permit = match permit {
+                Ok(p) => p,
+                Err(StoreRefusal::Busy) => {
+                    return Ok(PeerReply::Error(
+                        "too many store transfers in flight — retry shortly".into(),
+                    ));
+                }
+                Err(StoreRefusal::Quota) => {
+                    return Ok(PeerReply::Error(format!(
+                        "quota exceeded: {used} + {size} (plus in-flight stores) > {granted} available"
+                    )));
+                }
+            };
             let iroh_hash = iroh_blobs::Hash::from_bytes(hash);
             // Pin the incoming blob: it isn't in `held` yet, so a GC pass
             // between fetch and the row commit would otherwise delete it
@@ -1020,9 +1113,18 @@ async fn handle_inner(
             } else {
                 Some(granted.saturating_sub(used))
             };
-            crate::net::fetch_blob(state, remote, iroh_hash, fetch_cap)
-                .await
-                .map_err(|e| anyhow::anyhow!("fetching blob from you failed: {e:#}"))?;
+            // Transfer deadline mirrors the caller's own budget (peer_call):
+            // a slow-drip transfer can't hold the slot and temp-tag past it.
+            let deadline = std::time::Duration::from_secs(180 + size / (256 * 1024));
+            tokio::time::timeout(
+                deadline,
+                crate::net::fetch_blob(state, remote, iroh_hash, fetch_cap),
+            )
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!("blob fetch exceeded its {}s deadline", deadline.as_secs())
+            })?
+            .map_err(|e| anyhow::anyhow!("fetching blob from you failed: {e:#}"))?;
             // Quota accounting uses the size we actually stored, not the
             // caller's claim.
             let actual_size = match state.blobs.blobs().status(iroh_hash).await? {
@@ -1345,4 +1447,52 @@ async fn handle_hello(
         proto_version: PROTO_VERSION,
         approved,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn store_limiter_caps_concurrency_and_headroom() {
+        let limiter = StoreLimiter::default();
+        let owner = [7u8; 32];
+
+        // Concurrency cap: MAX_INFLIGHT_STORES then Busy.
+        let mut permits = Vec::new();
+        for _ in 0..MAX_INFLIGHT_STORES {
+            permits.push(
+                limiter
+                    .try_acquire(owner, 0, u64::MAX)
+                    .unwrap_or_else(|_| panic!("slot should be free")),
+            );
+        }
+        assert!(matches!(
+            limiter.try_acquire(owner, 0, u64::MAX),
+            Err(StoreRefusal::Busy)
+        ));
+        // Dropping one frees a slot.
+        permits.pop();
+        assert!(limiter.try_acquire(owner, 0, u64::MAX).is_ok());
+
+        // A second owner is unaffected.
+        assert!(limiter.try_acquire([9u8; 32], 0, u64::MAX).is_ok());
+    }
+
+    #[test]
+    fn store_limiter_charges_inflight_against_headroom() {
+        let limiter = StoreLimiter::default();
+        let owner = [3u8; 32];
+
+        let _a = limiter.try_acquire(owner, 60, 100).expect("fits");
+        // 60 in flight + 50 more > 100 headroom: refused early.
+        assert!(matches!(
+            limiter.try_acquire(owner, 50, 100),
+            Err(StoreRefusal::Quota)
+        ));
+        assert!(limiter.try_acquire(owner, 40, 100).is_ok());
+        // Drop releases the charge.
+        drop(_a);
+        assert!(limiter.try_acquire(owner, 90, 100).is_ok());
+    }
 }

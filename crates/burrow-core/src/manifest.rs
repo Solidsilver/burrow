@@ -1,7 +1,10 @@
 //! The snapshot manifest: an encrypted, postcard-encoded description of one
 //! point-in-time backup — every file, its metadata, and the chunk list needed
-//! to rebuild it. Manifests are sealed and stored exactly like data chunks, so
-//! holding peers can't distinguish them; owners pin them with named tags.
+//! to rebuild it. Manifests are sealed like data chunks and their *contents*
+//! are unreadable to holders, but holders are told which blobs are manifests
+//! (the `is_manifest` wire flag lets a disaster recovery find candidates), so
+//! snapshot cadence/count is visible and manifests are a targeted-deletion
+//! single point of failure — keep `replicas` at 2 or more.
 
 use serde::{Deserialize, Serialize};
 

@@ -26,14 +26,17 @@
 # (vite's outDir lands at /src/crates/burrow-daemon/web-dist, which rust-embed
 # picks up at compile time). Without this stage the daemon still compiles —
 # build.rs falls back to a placeholder page.
-FROM node:22-bookworm-slim AS webbuilder
+# Base images are digest-pinned (supply-chain: a mutable tag can be
+# re-pointed at a poisoned image). Dependabot's docker ecosystem files PRs
+# that bump the digests as the tags move.
+FROM node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3 AS webbuilder
 WORKDIR /src/web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
 COPY web/ ./
 RUN npm run build
 
-FROM rust:1-bookworm AS builder
+FROM rust:1-bookworm@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa AS builder
 WORKDIR /src
 COPY . .
 COPY --from=webbuilder /src/crates/burrow-daemon/web-dist crates/burrow-daemon/web-dist
@@ -43,7 +46,7 @@ COPY --from=webbuilder /src/crates/burrow-daemon/web-dist crates/burrow-daemon/w
 RUN cargo build --release -p burrow
 
 # ---- shared runtime definition ----------------------------------------------
-FROM debian:bookworm-slim AS runtime
+FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 AS runtime
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates \
  && rm -rf /var/lib/apt/lists/* \

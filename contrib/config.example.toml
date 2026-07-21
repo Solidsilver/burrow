@@ -38,6 +38,10 @@ verify_interval = "1h"
 # # proxy, every remote client looks like 127.0.0.1 — set this false so all
 # # clients need the token.
 # trust_loopback = true
+# # Requests must carry a recognized Host header — an IP literal, localhost,
+# # or a DNS name listed here (DNS-rebinding protection). Add your LAN
+# # hostname or proxy vhost when you browse by name instead of IP.
+# allowed_hosts = ["burrow.example.com"]
 
 # One [[backup]] block per thing you back up.
 [[backup]]

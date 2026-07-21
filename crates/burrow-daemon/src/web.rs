@@ -6,9 +6,13 @@
 //! Svelte SPA) are embedded from `web-dist/`; a placeholder page is written
 //! by build.rs when the frontend hasn't been built.
 //!
-//! Auth model: loopback clients are trusted (same as the control socket's
-//! filesystem permissions). Any other client must send
-//! `Authorization: Bearer <token>` with the token from
+//! Auth model: every request must carry a `Host` we recognize (an IP literal,
+//! `localhost`/`*.localhost`, or a name in `[web] allowed_hosts`) — that is
+//! what stops DNS rebinding, since a rebound attack page always keeps its own
+//! domain in the URL. Mutating requests additionally reject cross-site
+//! `Origin`/`Sec-Fetch-Site`. Loopback clients are then trusted without a
+//! token (same as the control socket's filesystem permissions). Any other
+//! client must send `Authorization: Bearer <token>` with the token from
 //! `~/.config/burrow/web.token` (`burrow web token` prints it).
 
 use std::net::SocketAddr;
@@ -17,7 +21,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use axum::body::Body;
 use axum::extract::{ConnectInfo, Path, Request, State};
-use axum::http::{header, StatusCode, Uri};
+use axum::http::{header, Method, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -96,12 +100,128 @@ fn router(state: WebState) -> Router {
     Router::new()
         .nest("/api/v1", api)
         .fallback(static_or_spa)
+        // Outermost layer: runs before auth, on API and static alike.
+        .layer(middleware::from_fn_with_state(state.clone(), guard))
         .with_state(state)
+}
+
+/// DNS-rebinding / cross-site guard.
+///
+/// * `Host` must be an IP literal, `localhost`/`*.localhost`, or a name in
+///   `[web] allowed_hosts`. A rebound attack page keeps its own domain in
+///   the URL, so its fetches arrive as `Host: attacker.example` and die
+///   here — while users who browsed to an IP or localhost are unaffected.
+/// * Mutating methods additionally reject cross-site requests: a present
+///   `Origin` must match the `Host` name (or be allowlisted), and
+///   `Sec-Fetch-Site: cross-site` is refused. Classic CSRF is already
+///   impossible — no cookies, and the `Json` extractors force a preflighted
+///   content type with no CORS layer — so these are defense in depth.
+async fn guard(
+    State(state): State<WebState>,
+    req: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let host = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    let allowed = &state.app.config.web.allowed_hosts;
+    if !host_allowed(host, allowed) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let method = req.method();
+    if !(method == Method::GET || method == Method::HEAD || method == Method::OPTIONS) {
+        if req
+            .headers()
+            .get("sec-fetch-site")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|site| site.eq_ignore_ascii_case("cross-site"))
+        {
+            return Err(StatusCode::FORBIDDEN);
+        }
+        if let Some(origin) = req
+            .headers()
+            .get(header::ORIGIN)
+            .and_then(|v| v.to_str().ok())
+        {
+            // Proxies that don't forward the original Host still pass when
+            // the Origin's name is explicitly allowlisted.
+            if !origin_matches_host(origin, host) && !origin_allowlisted(origin, allowed) {
+                return Err(StatusCode::FORBIDDEN);
+            }
+        }
+    }
+    Ok(next.run(req).await)
+}
+
+/// The host part of a `Host` header value, without the port:
+/// "127.0.0.1:8385" → "127.0.0.1", "[::1]:8385" → "::1". None for malformed
+/// values (empty host, unbracketed IPv6).
+fn host_name(host_header: &str) -> Option<&str> {
+    let h = host_header.trim();
+    if let Some(rest) = h.strip_prefix('[') {
+        let end = rest.find(']')?;
+        return Some(&rest[..end]);
+    }
+    match h.matches(':').count() {
+        0 => Some(h),
+        1 => h.split(':').next(),
+        _ => None,
+    }
+}
+
+/// Is this `Host` value one we serve? IP literals (any — a rebounded attack
+/// page cannot mint a literal-IP `Host`) and localhost names are always fine;
+/// DNS names must be explicitly allowlisted in `[web] allowed_hosts`.
+fn host_allowed(host_header: &str, extra: &[String]) -> bool {
+    let Some(name) = host_name(host_header) else {
+        return false;
+    };
+    if name.is_empty() {
+        return false;
+    }
+    if name.parse::<std::net::IpAddr>().is_ok() {
+        return true;
+    }
+    let lower = name.to_ascii_lowercase();
+    lower == "localhost"
+        || lower.ends_with(".localhost")
+        || extra.iter().any(|h| h.trim().eq_ignore_ascii_case(&lower))
+}
+
+/// The authority (host[:port]) of an `Origin` header value, e.g.
+/// "http://127.0.0.1:8385" → "127.0.0.1:8385". None without a scheme
+/// separator (covers the "null" origin of sandboxed frames).
+fn origin_host(origin: &str) -> Option<&str> {
+    let authority = origin.split("://").nth(1)?;
+    Some(authority.split('/').next().unwrap_or(""))
+}
+
+/// Does an `Origin` belong to the same host as the request's `Host`?
+/// Compares names only: scheme and port legitimately differ behind a
+/// TLS-terminating proxy.
+fn origin_matches_host(origin: &str, host_header: &str) -> bool {
+    match (
+        origin_host(origin).and_then(host_name),
+        host_name(host_header),
+    ) {
+        (Some(a), Some(b)) => !a.is_empty() && a.eq_ignore_ascii_case(b),
+        _ => false,
+    }
+}
+
+/// Is the `Origin`'s host name in the `[web] allowed_hosts` list?
+fn origin_allowlisted(origin: &str, extra: &[String]) -> bool {
+    origin_host(origin)
+        .and_then(host_name)
+        .is_some_and(|name| extra.iter().any(|h| h.trim().eq_ignore_ascii_case(name)))
 }
 
 /// Loopback skips auth (same trust model as the control socket) unless
 /// `[web] trust_loopback = false` (reverse-proxy setups); everyone else
-/// needs `Authorization: Bearer <web.token>`.
+/// needs `Authorization: Bearer <web.token>`. Runs after `guard`, so the
+/// `Host` here is already known-good.
 async fn auth(
     State(state): State<WebState>,
     req: Request,
@@ -477,5 +597,64 @@ mod tests {
     fn cache_policy() {
         assert!(cache_for("assets/app-abc.js").contains("immutable"));
         assert_eq!(cache_for("index.html"), "no-cache");
+    }
+
+    #[test]
+    fn host_names() {
+        assert_eq!(host_name("127.0.0.1:8385"), Some("127.0.0.1"));
+        assert_eq!(host_name("localhost"), Some("localhost"));
+        assert_eq!(host_name("[::1]:8385"), Some("::1"));
+        assert_eq!(host_name("[::1]"), Some("::1"));
+        assert_eq!(host_name(":8385"), Some(""));
+        assert_eq!(host_name("::1:8385"), None); // unbracketed v6: malformed
+    }
+
+    #[test]
+    fn host_allowlist() {
+        let extra = vec!["burrow.example.com".to_string()];
+        // IP literals always pass (loopback, LAN, v6) — a rebound attack
+        // page can't mint a literal-IP Host.
+        assert!(host_allowed("127.0.0.1:8385", &extra));
+        assert!(host_allowed("127.0.0.1", &extra));
+        assert!(host_allowed("192.168.1.5:8385", &extra));
+        assert!(host_allowed("[::1]:8385", &extra));
+        // localhost names pass.
+        assert!(host_allowed("localhost:8385", &extra));
+        assert!(host_allowed("ui.localhost:8385", &extra));
+        assert!(host_allowed("LOCALHOST:8385", &extra));
+        // Allowlisted DNS names pass.
+        assert!(host_allowed("burrow.example.com", &extra));
+        assert!(host_allowed("Burrow.Example.COM:443", &extra));
+        // Everything else — notably the attacker's rebound domain — fails.
+        assert!(!host_allowed("attacker.example", &extra));
+        assert!(!host_allowed("burrow.example.com", &[]));
+        assert!(!host_allowed("", &extra));
+        assert!(!host_allowed(":8385", &extra));
+        assert!(!host_allowed("::1:8385", &extra));
+    }
+
+    #[test]
+    fn origin_checks() {
+        assert!(origin_matches_host(
+            "http://127.0.0.1:8385",
+            "127.0.0.1:8385"
+        ));
+        // Scheme/port may differ behind a TLS-terminating proxy.
+        assert!(origin_matches_host(
+            "https://burrow.example.com",
+            "burrow.example.com"
+        ));
+        assert!(origin_matches_host("http://[::1]:8385", "[::1]:8385"));
+        assert!(!origin_matches_host(
+            "http://attacker.example",
+            "127.0.0.1:8385"
+        ));
+        assert!(!origin_matches_host("null", "127.0.0.1:8385"));
+        assert!(!origin_matches_host("", "127.0.0.1:8385"));
+
+        let extra = vec!["burrow.example.com".to_string()];
+        assert!(origin_allowlisted("https://burrow.example.com", &extra));
+        assert!(!origin_allowlisted("https://attacker.example", &extra));
+        assert!(!origin_allowlisted("null", &extra));
     }
 }

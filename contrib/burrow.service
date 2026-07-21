@@ -44,7 +44,11 @@ RuntimeDirectoryMode=0700
 # --- Sandboxing (see `systemd-analyze security burrow`) ---
 NoNewPrivileges=true
 ProtectSystem=strict
-ProtectHome=true
+# read-only, NOT true: backups must be able to read /home (every example
+# backs up /home/...). Writes under /home still fail — ProtectSystem=strict
+# already confines writes to the State/Config/Runtime directories; a restore
+# to other paths needs a ReadWritePaths drop-in, same as before.
+ProtectHome=read-only
 PrivateTmp=true
 PrivateDevices=true
 ProtectKernelTunables=true

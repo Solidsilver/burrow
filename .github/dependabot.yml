@@ -1,0 +1,21 @@
+# Keep the SHA-pinned supply chain current: actions, Cargo crates, web npm
+# dev-deps, and the digest-pinned Dockerfile base images all drift — weekly
+# PRs are the bump mechanism.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: npm
+    directory: /web
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
