@@ -1,0 +1,82 @@
+# burrow — distributed backup among friends, over iroh.
+# https://github.com/solidsilver/burrow
+#
+# Reference Compose file for a self-hosted server, using the published
+# multi-arch image (amd64 + arm64) — nothing to build. Everything optional
+# is commented out below.
+#
+# One-time setup — creates the repo key and prints your RECOVERY PHRASE
+# (store it somewhere safe OFF this machine; it is the only thing that
+# decrypts your backups):
+#
+#   docker compose run --rm burrow init
+#
+# Then start the daemon:
+#
+#   docker compose up -d
+#
+# Day-to-day CLI commands run inside the same container:
+#
+#   docker compose exec burrow burrow status
+#   docker compose exec burrow burrow peer invite
+#   docker compose exec burrow burrow grant <friend> 200gb
+#
+# Optional settings live in /etc/burrow/config.toml in the config volume —
+# see contrib/config.example.toml for the full schema.
+
+name: burrow
+
+services:
+  burrow:
+    image: ghcr.io/solidsilver/burrow:latest
+    # Pin to a release instead of tracking latest:
+    # image: ghcr.io/solidsilver/burrow:0.2.1
+    container_name: burrow
+    restart: unless-stopped
+
+    volumes:
+      # Repo key, config.toml, web.token. SECRET: holds the key that
+      # decrypts your backups — keep it off your friends' machines.
+      - burrow-config:/etc/burrow
+      # Metadata database + blob store: your snapshots plus the data you
+      # hold for friends. Size this for [storage] offer_max in config.toml.
+      - burrow-data:/var/lib/burrow
+
+      # Prefer bind mounts over named volumes? chown them to the container
+      # user (uid 10001) first, then use e.g.:
+      #   sudo mkdir -p /srv/burrow/{config,data} && sudo chown -R 10001:10001 /srv/burrow
+      # - /srv/burrow/config:/etc/burrow
+      # - /srv/burrow/data:/var/lib/burrow
+
+      # The folders you back up, mounted read-only at the SAME paths you
+      # list under [[backup]] paths in config.toml. The container user
+      # only needs to READ them.
+      # - /tank/photos:/tank/photos:ro
+      # - /srv/documents:/srv/documents:ro
+
+      # Store bulk blobs on a separate pool (metadata stays on
+      # burrow-data, blobs go on the big disk). Requires BURROW_BLOBS_DIR
+      # in the environment block below.
+      # - /mnt/bigpool/burrow:/blobs
+
+    # environment:
+      # Point the blob store at the extra volume mounted above.
+      # BURROW_BLOBS_DIR: /blobs
+
+    # No inbound ports are needed: iroh hole-punches outbound with relay
+    # fallback. On Linux, host networking improves the direct-connection
+    # rate (iroh can enumerate the real interfaces); it is a no-op on
+    # Docker Desktop for Mac/Windows. With host networking the "ports"
+    # block below is ignored — services bind straight onto the host.
+    # network_mode: host
+
+    # ports:
+      # Web UI + JSON API. Requires [web] enable = true and
+      # bind = "0.0.0.0:8385" in config.toml. Non-loopback browsers are
+      # asked for the auto-generated token — print it with:
+      #   docker compose exec burrow burrow web token
+      # - "8385:8385"
+
+volumes:
+  burrow-config:
+  burrow-data:

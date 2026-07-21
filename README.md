@@ -271,6 +271,10 @@ volumes inherit the right ownership automatically, but a *bind* mount must be
 Build it yourself with `docker build -t burrow .` (compiles from source); the
 published images are built with `--target prebuilt` from the release binary.
 
+Prefer Compose? A self-documenting `compose.yaml` with the optional bits
+commented out ships in the repo root: `docker compose run --rm burrow init`
+once, then `docker compose up -d`.
+
 ## Security model
 
 - Peers are Ed25519 keys (iroh endpoint IDs); every connection is mutually
