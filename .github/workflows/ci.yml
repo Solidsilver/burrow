@@ -81,6 +81,32 @@ jobs:
       - run: npm run build
         working-directory: web
 
+  chart:
+    name: helm chart
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      # Pinned version + checksum verification, same as the release job.
+      - name: Install helm
+        run: |
+          set -euo pipefail
+          v=3.16.3
+          curl -fsSLO "https://get.helm.sh/helm-v${v}-linux-amd64.tar.gz"
+          curl -fsSLO "https://get.helm.sh/helm-v${v}-linux-amd64.tar.gz.sha256sum"
+          sha256sum -c "helm-v${v}-linux-amd64.tar.gz.sha256sum"
+          tar xzf "helm-v${v}-linux-amd64.tar.gz"
+          sudo install -m 0755 linux-amd64/helm /usr/local/bin/helm
+      - name: Lint
+        run: helm lint charts/burrow --set burrow.existingSecret=ci
+      # Render every template once (validation guards only fire on render).
+      - name: Template smoke test
+        run: |
+          helm template burrow charts/burrow \
+            --set burrow.existingSecret=ci \
+            --set web.service.enabled=true \
+            --set web.ingress.enabled=true \
+            --set persistence.blobs.enabled=true >/dev/null
+
   nix:
     name: nix flake check
     runs-on: ubuntu-latest

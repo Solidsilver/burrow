@@ -192,12 +192,37 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write # create the GitHub release
+      packages: write # push the helm chart OCI artifact to GHCR
       id-token: write # keyless Sigstore identity for attestations
       attestations: write
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: artifacts
+      # Helm is not preinstalled on the runners and has no SHA-pinnable
+      # setup action — fetch a pinned version and verify its checksum.
+      - name: Install helm
+        shell: bash
+        run: |
+          set -euo pipefail
+          v=3.16.3
+          curl -fsSLO "https://get.helm.sh/helm-v${v}-linux-amd64.tar.gz"
+          curl -fsSLO "https://get.helm.sh/helm-v${v}-linux-amd64.tar.gz.sha256sum"
+          sha256sum -c "helm-v${v}-linux-amd64.tar.gz.sha256sum"
+          tar xzf "helm-v${v}-linux-amd64.tar.gz"
+          sudo install -m 0755 linux-amd64/helm /usr/local/bin/helm
+      # The chart is versioned in lockstep with the app: both the chart
+      # version and appVersion are stamped from the tag (the values committed
+      # in charts/burrow/Chart.yaml are for source checkouts). The packaged
+      # .tgz joins release/ so it gets checksummed, attested, and attached
+      # to the GitHub release like every other artifact.
+      - name: Package helm chart
+        shell: bash
+        run: |
+          mkdir -p release
+          version="${GITHUB_REF_NAME#v}"
+          helm package charts/burrow --version "$version" --app-version "$version" \
+            --destination release/
       - name: Collect artifacts and checksums
         shell: bash
         run: |
@@ -219,6 +244,39 @@ jobs:
           files: release/*
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, '-') }}
+      # The same chart .tgz attached to the release, pushed as an OCI
+      # artifact: `helm install oci://ghcr.io/<owner>/charts/burrow`.
+      # helm reuses the docker credential store, so one login covers both.
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push chart to GHCR (OCI)
+        id: chart
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          repo="ghcr.io/${GITHUB_REPOSITORY,,}/charts"
+          # helm push prints Pushed:/Digest: on STDERR, so merge the streams.
+          out="$(helm push "release/burrow-${version}.tgz" "oci://${repo}" 2>&1)"
+          echo "$out"
+          digest="$(printf '%s\n' "$out" | grep -oE 'sha256:[0-9a-f]{64}' | head -1)"
+          if [ -z "$digest" ]; then
+            echo "::error::could not parse chart digest from helm push output"
+            exit 1
+          fi
+          echo "CHART_IMAGE=${repo}/burrow" >> "$GITHUB_ENV"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+      # SLSA provenance for the registry artifact, matching the image job.
+      - name: Attest chart provenance
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-name: ${{ env.CHART_IMAGE }}
+          subject-digest: ${{ steps.chart.outputs.digest }}
+          push-to-registry: true
 
   homebrew:
     name: bump homebrew tap
